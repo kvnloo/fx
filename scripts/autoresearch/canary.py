@@ -33,11 +33,11 @@ FX_BIN = ROOT / "zig-out/bin/fx"
 CHECK_BUDGETS = ROOT / "benchmarks/check_budgets.py"
 SUMMARIZE = ROOT / "benchmarks/summarize.py"
 
-NEEDLE = """fn runBeforeInteractiveWithDeps(alloc: Allocator, args: []const [:0]const u8, cfg: Config, deps: RunDeps) !BeforeInteractiveResult {
-    const run_result = deps.run_if_requested"""
-REPLACEMENT = """fn runBeforeInteractiveWithDeps(alloc: Allocator, args: []const [:0]const u8, cfg: Config, deps: RunDeps) !BeforeInteractiveResult {
+NEEDLE = """pub fn runBeforeInteractive(alloc: Allocator, args: []const [:0]const u8, cfg: Config) !BeforeInteractiveResult {
+    const run_result = cli_surface.runIfRequested"""
+REPLACEMENT = """pub fn runBeforeInteractive(alloc: Allocator, args: []const [:0]const u8, cfg: Config) !BeforeInteractiveResult {
     io_mod.sleep(5 * std.time.ns_per_ms); // AUTORESEARCH_V0_KNOWN_REGRESSION
-    const run_result = deps.run_if_requested"""
+    const run_result = cli_surface.runIfRequested"""
 
 HYPERFINE_FILES = (
     "baseline.json",
@@ -139,7 +139,7 @@ def benchmark(binary: Path, label: str, out: Path) -> tuple[int, dict[str, float
     env = os.environ.copy()
     env["FX_AUTO_UPGRADE"] = "0"
     proc = run(
-        [str(BENCH), "--ci"],
+        [str(BENCH), "--quick"],
         log=out / "logs" / f"{label}-benchmark.log",
         env=env,
     )
@@ -225,6 +225,10 @@ def main() -> int:
         candidate_binary.parent.mkdir(parents=True)
         shutil.copy2(FX_BIN, candidate_binary)
         report["candidate_binary_sha256"] = sha256_file(candidate_binary)
+        if report["candidate_binary_sha256"] == report["control_binary_sha256"]:
+            report["decision"] = "INVALID_CANARY"
+            report["reason"] = "candidate binary is byte-identical to control"
+            return write_report(report, out, 3)
 
         # Restore the source before the candidate is judged. The evaluator sees
         # only immutable binaries and its own unchanged files.
