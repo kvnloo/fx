@@ -5,6 +5,7 @@ on:
     branches: [research/upstream-main-20260920]
     paths:
       - "scripts/autoresearch/**"
+      - ".github/workflows/autoresearch-v0.yml"
 
 permissions:
   contents: read
