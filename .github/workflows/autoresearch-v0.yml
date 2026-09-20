@@ -1,10 +1,11 @@
 name: Autoresearch v0 canary
 
 on:
-  pull_request:
-    branches: [research/upstream-main-20260920]
+  push:
+    branches: [research/autoresearch-v0-20260920]
     paths:
       - "scripts/autoresearch/**"
+      - ".github/workflows/autoresearch-v0.yml"
 
 permissions:
   contents: read
