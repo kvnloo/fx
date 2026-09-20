@@ -26,18 +26,18 @@ import time
 
 
 ROOT = Path(__file__).resolve().parents[2]
-TARGET = ROOT / "src/core/app/app_entry_runtime.zig"
+TARGET = ROOT / "src/main.zig"
 BENCH = ROOT / "benchmarks/startup.sh"
 RESULTS = ROOT / "benchmarks/results"
 FX_BIN = ROOT / "zig-out/bin/fx"
 CHECK_BUDGETS = ROOT / "benchmarks/check_budgets.py"
 SUMMARIZE = ROOT / "benchmarks/summarize.py"
 
-NEEDLE = """pub fn runBeforeInteractive(alloc: Allocator, args: []const [:0]const u8, cfg: Config) !BeforeInteractiveResult {
-    const run_result = cli_surface.runIfRequested"""
-REPLACEMENT = """pub fn runBeforeInteractive(alloc: Allocator, args: []const [:0]const u8, cfg: Config) !BeforeInteractiveResult {
-    io_mod.sleep(5 * std.time.ns_per_ms); // AUTORESEARCH_V0_KNOWN_REGRESSION
-    const run_result = cli_surface.runIfRequested"""
+NEEDLE = """    if (shouldRunBenchmarkNoArgRaw(raw_args, raw_env)) {
+        switch (cli_surface.parse(builtin_commands.top_level_registry, &.{})) {"""
+REPLACEMENT = """    if (shouldRunBenchmarkNoArgRaw(raw_args, raw_env)) {
+        io_mod.sleep(5 * std.time.ns_per_ms); // AUTORESEARCH_V0_KNOWN_REGRESSION
+        switch (cli_surface.parse(builtin_commands.top_level_registry, &.{})) {"""
 
 HYPERFINE_FILES = (
     "baseline.json",
@@ -210,7 +210,7 @@ def main() -> int:
         mutated = source.replace(NEEDLE, REPLACEMENT, 1).encode("utf-8")
         TARGET.write_bytes(mutated)
         report["candidate_source_sha256"] = sha256_bytes(mutated)
-        report["candidate_mutation"] = "inject 5 ms delay before CLI dispatch"
+        report["candidate_mutation"] = "inject 5 ms delay inside FX_BENCH no-arg startup fast path"
 
         candidate_build = run(
             ["zig", "build", "-Doptimize=ReleaseSafe"],
