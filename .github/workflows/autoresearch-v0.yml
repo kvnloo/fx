@@ -1,0 +1,44 @@
+name: Autoresearch v0 canary
+
+on:
+  pull_request:
+    branches: [research/upstream-main-20260920]
+    paths:
+      - "scripts/autoresearch/**"
+
+permissions:
+  contents: read
+
+jobs:
+  reject-known-regression:
+    name: Reject known latency regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: "0.16.0"
+
+      - name: Install hyperfine
+        run: |
+          wget -q https://github.com/sharkdp/hyperfine/releases/download/v1.19.0/hyperfine_1.19.0_amd64.deb
+          sudo dpkg -i hyperfine_1.19.0_amd64.deb
+
+      - name: Run frozen-judge canary
+        env:
+          FX_AUTORESEARCH_PRODUCT_BASE: 61a2357939bc3ec9d58fde78d2db6118e9800ed5
+          FX_AUTORESEARCH_OUT: ${{ runner.temp }}/autoresearch-v0
+        run: python3 scripts/autoresearch/canary.py
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: autoresearch-v0-${{ github.sha }}
+          path: ${{ runner.temp }}/autoresearch-v0
+          if-no-files-found: error
