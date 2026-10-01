@@ -83,6 +83,7 @@ const app_mcp_runtime = @import("core/app/app_mcp_runtime.zig");
 const app_mcp_menu_runtime = @import("core/app/app_mcp_menu_runtime.zig");
 const skill_commands = @import("core/skills/skill_commands.zig");
 const skill_runtime = @import("core/skills/skill_runtime.zig");
+const plugin_manifest = @import("core/plugins/plugin_manifest.zig");
 const cli_surface = @import("core/cli/cli_surface.zig");
 const hooks = @import("core/hooks/hooks.zig");
 const github_publish = @import("core/github/github_publish.zig");
@@ -4969,4 +4970,9 @@ test {
     _ = @import("core/agent/worker_runtime.zig");
     _ = @import("gateway/client.zig");
     _ = @import("gateway/host_stream_provider.zig");
+}
+
+
+test "Agent Plugins manifest inspector participates in core tests" {
+    _ = plugin_manifest;
 }
