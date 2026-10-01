@@ -232,8 +232,13 @@ pub fn pollDeviceTokenBounded(
     deadline: std.Io.Clock.Timestamp,
 ) !PollResult {
     var form: FormBody = .{};
-    var writer: std.Io.Writer.Allocating = .init(alloc);
+    var writer: std.Io.Writer.Allocating = try .initCapacity(alloc, formCapacity(&.{
+        "client_id", client_id,
+        "grant_type", "urn:ietf:params:oauth:grant-type:device_code",
+        "device_code", device_code,
+    }));
     defer writer.deinit();
+    defer secret.zero(writer.written());
     try form.append(&writer.writer, "client_id", client_id);
     try form.append(&writer.writer, "grant_type", "urn:ietf:params:oauth:grant-type:device_code");
     try form.append(&writer.writer, "device_code", device_code);
@@ -265,8 +270,13 @@ pub fn refreshToken(
     refresh_token: []const u8,
 ) !TokenSet {
     var form: FormBody = .{};
-    var writer: std.Io.Writer.Allocating = .init(alloc);
+    var writer: std.Io.Writer.Allocating = try .initCapacity(alloc, formCapacity(&.{
+        "client_id", client_id,
+        "grant_type", "refresh_token",
+        "refresh_token", refresh_token,
+    }));
     defer writer.deinit();
+    defer secret.zero(writer.written());
     try form.append(&writer.writer, "client_id", client_id);
     try form.append(&writer.writer, "grant_type", "refresh_token");
     try form.append(&writer.writer, "refresh_token", refresh_token);
@@ -291,8 +301,13 @@ pub fn revokeToken(
     token_type_hint: TokenTypeHint,
 ) !void {
     var form: FormBody = .{};
-    var writer: std.Io.Writer.Allocating = .init(alloc);
+    var writer: std.Io.Writer.Allocating = try .initCapacity(alloc, formCapacity(&.{
+        "client_id", client_id,
+        "token", token,
+        "token_type_hint", @tagName(token_type_hint),
+    }));
     defer writer.deinit();
+    defer secret.zero(writer.written());
     try form.append(&writer.writer, "client_id", client_id);
     try form.append(&writer.writer, "token", token);
     try form.append(&writer.writer, "token_type_hint", @tagName(token_type_hint));
@@ -437,6 +452,16 @@ fn mapOAuthHttpError(alloc: Allocator, body: []const u8) !void {
     if (std.mem.eql(u8, value.string, "invalid_client")) return OAuthError.InvalidClient;
     if (std.mem.eql(u8, value.string, "invalid_grant")) return OAuthError.InvalidGrant;
     return OAuthError.OAuthRequestFailed;
+}
+
+/// Upper bound for an application/x-www-form-urlencoded body. Percent
+/// encoding expands each byte to at most three bytes; separators are bounded by
+/// the number of key/value parts. Reserving this before secrets are written
+/// prevents reallocations from abandoning plaintext copies.
+pub fn formCapacity(parts: []const []const u8) usize {
+    var total: usize = 0;
+    for (parts) |part| total += part.len * 3;
+    return total + parts.len;
 }
 
 pub const FormBody = struct {
@@ -948,4 +973,19 @@ test "oauth parsers reject non-object JSON" {
     try std.testing.expectError(OAuthError.InvalidOAuthResponse, parseDeviceAuthorization(std.testing.allocator, "null"));
     try std.testing.expectError(OAuthError.InvalidOAuthResponse, parseTokenSet(std.testing.allocator, "\"token\""));
     try std.testing.expectError(OAuthError.OAuthRequestFailed, mapOAuthHttpError(std.testing.allocator, "42"));
+}
+
+
+test "formCapacity covers worst-case percent encoding" {
+    const parts = [_][]const u8{
+        "client_id", "client",
+        "refresh_token", "\x00\x01 token/%" ** 16,
+    };
+    const alloc = std.testing.allocator;
+    var out: std.Io.Writer.Allocating = .init(alloc);
+    defer out.deinit();
+    var form: FormBody = .{};
+    try form.append(&out.writer, parts[0], parts[1]);
+    try form.append(&out.writer, parts[2], parts[3]);
+    try std.testing.expect(formCapacity(&parts) >= out.written().len);
 }
