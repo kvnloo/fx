@@ -95,12 +95,27 @@ pub fn executeBearerGet(
     url: []const u8,
     access_token: []const u8,
 ) !oauth_transport.Response {
-    const authorization = try std.fmt.allocPrint(alloc, "Bearer {s}", .{access_token});
+    const authorization = try secret.bearerHeaderAlloc(alloc, access_token);
     defer secret.zeroAndFree(alloc, authorization);
     return executeRequest(alloc, "GET", url, &.{.{
         .name = "authorization",
         .value = authorization,
     }}, "");
+}
+
+fn headersJsonCapacity(headers: anytype) usize {
+    var total: usize = 2;
+    const Element = switch (@typeInfo(@TypeOf(headers))) {
+        .pointer => |pointer| pointer.child,
+        else => @TypeOf(headers),
+    };
+    const element_info = @typeInfo(Element);
+    if (element_info == .@"struct" and element_info.@"struct".is_tuple) {
+        inline for (headers) |header| total += (header.name.len + header.value.len) * 6 + 32;
+    } else {
+        for (headers) |header| total += (header.name.len + header.value.len) * 6 + 32;
+    }
+    return total;
 }
 
 fn executeRequest(
@@ -110,8 +125,12 @@ fn executeRequest(
     headers: anytype,
     body: []const u8,
 ) !oauth_transport.Response {
-    var headers_json: std.Io.Writer.Allocating = .init(alloc);
+    var headers_json: std.Io.Writer.Allocating = try .initCapacity(
+        alloc,
+        headersJsonCapacity(headers),
+    );
     defer headers_json.deinit();
+    defer secret.zero(headers_json.written());
     try std.json.Stringify.value(headers, .{}, &headers_json.writer);
 
     const response_buffer = try alloc.alloc(u8, max_response_bytes);
@@ -285,4 +304,16 @@ test "request bounds reject cancellation before touching the JS host" {
         .url = "https://vercel.test",
         .cancel_flag = &cancelled,
     }));
+}
+
+
+test "header json capacity covers escaped authorization headers" {
+    const headers = .{
+        .{ .name = "authorization", .value = "Bearer abc.def.ghi" },
+        .{ .name = "x-test", .value = "\x00\x01\n\t" },
+    };
+    var encoded: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer encoded.deinit();
+    try std.json.Stringify.value(headers, .{}, &encoded.writer);
+    try std.testing.expect(headersJsonCapacity(headers) >= encoded.written().len);
 }
