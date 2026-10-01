@@ -235,16 +235,27 @@ pub fn parse(alloc: Allocator, bytes: []const u8) !Session {
 }
 
 pub fn stringify(alloc: Allocator, session: Session) ![]u8 {
-    var out: std.Io.Writer.Allocating = .init(alloc);
+    // Size the secret-bearing JSON before allocating it. Growing an
+    // allocating writer would release older plaintext token copies that the
+    // caller's final zeroAndFree cannot reach.
+    var counter: std.Io.Writer.Discarding = .init(&.{});
+    try writeSession(&counter.writer, session);
+    const exact = std.math.cast(usize, counter.fullCount()) orelse return error.OutOfMemory;
+
+    var out: std.Io.Writer.Allocating = try .initCapacity(alloc, exact);
     errdefer out.deinit();
-    try out.writer.writeAll("{\"version\":1,\"access_token\":");
-    try std.json.Stringify.value(session.access_token, .{}, &out.writer);
-    try out.writer.writeAll(",\"refresh_token\":");
-    try std.json.Stringify.value(session.refresh_token, .{}, &out.writer);
-    try out.writer.print(",\"expires_at_ms\":{d},\"account_id\":", .{session.expires_at_ms});
-    try std.json.Stringify.value(session.account_id, .{}, &out.writer);
-    try out.writer.writeAll("}\n");
+    try writeSession(&out.writer, session);
     return out.toOwnedSlice();
+}
+
+fn writeSession(writer: *std.Io.Writer, session: Session) !void {
+    try writer.writeAll("{\"version\":1,\"access_token\":");
+    try std.json.Stringify.value(session.access_token, .{}, writer);
+    try writer.writeAll(",\"refresh_token\":");
+    try std.json.Stringify.value(session.refresh_token, .{}, writer);
+    try writer.print(",\"expires_at_ms\":{d},\"account_id\":", .{session.expires_at_ms});
+    try std.json.Stringify.value(session.account_id, .{}, writer);
+    try writer.writeAll("}\n");
 }
 
 fn dupeRequiredString(alloc: Allocator, object: std.json.ObjectMap, key: []const u8) ![]u8 {
