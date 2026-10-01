@@ -8,6 +8,8 @@ pub const max_model_bytes = 1024;
 const max_url_bytes = 2048;
 const max_env_bytes = 128;
 const max_json_bytes = 1024 * 1024;
+pub const default_response_head_timeout_ms: u32 = 120_000;
+pub const max_response_head_timeout_ms: u32 = 30 * 60 * 1000;
 
 pub const ParseError = Allocator.Error || error{
     InvalidJson,
@@ -24,6 +26,7 @@ pub const ParseError = Allocator.Error || error{
     InvalidAuth,
     InvalidEnvironmentName,
     InvalidToolChoiceMode,
+    InvalidResponseHeadTimeout,
     InvalidModelId,
     InvalidModelMetadata,
 };
@@ -53,6 +56,9 @@ pub const Definition = struct {
     protocol: Protocol,
     base_url: []const u8,
     auth: Auth,
+    /// Optional wait for the first response head. Null preserves the 120 s
+    /// transport default. This is profile-owned connection policy.
+    response_head_timeout_ms: ?u32 = null,
     tool_choice_mode: ToolChoiceMode = .omit,
     reviewer_model: ?[]const u8 = null,
     model_metadata: []const ModelMetadata = &.{},
@@ -84,6 +90,14 @@ pub const Definition = struct {
         switch (self.auth) {
             .none => {},
             .bearer => |env| hash_part(&hash, env),
+        }
+        // Preserve existing binding identities when the optional field is
+        // absent. Explicit timeout policy becomes part of route provenance.
+        if (self.response_head_timeout_ms) |timeout| {
+            hash_part(&hash, "response_head_timeout_ms");
+            var encoded: [4]u8 = undefined;
+            std.mem.writeInt(u32, &encoded, timeout, .big);
+            hash.update(&encoded);
         }
         return hash.finalResult();
     }
@@ -163,13 +177,22 @@ pub const Registry = struct {
 
 fn parse_definition(alloc: Allocator, id: []const u8, value: std.json.Value) ParseError!Definition {
     try validate_id(id);
-    try check_fields(value, &.{ "protocol", "base_url", "auth", "tool_choice_mode", "reviewer_model", "model_metadata" });
+    try check_fields(value, &.{ "protocol", "base_url", "auth", "response_head_timeout_ms", "tool_choice_mode", "reviewer_model", "model_metadata" });
     const protocol = try required(value, "protocol");
     if (protocol != .string or !std.mem.eql(u8, protocol.string, "openai-chat-completions")) return error.InvalidProtocol;
     const url = try required(value, "base_url");
     if (url != .string) return error.InvalidBaseUrl;
     const normalized = try validate_url(url.string);
     const auth = try parse_auth(try required(value, "auth"));
+    const response_head_timeout_ms: ?u32 = if (value.object.get("response_head_timeout_ms")) |timeout| blk: {
+        if (timeout != .integer or
+            timeout.integer < 1 or
+            timeout.integer > max_response_head_timeout_ms)
+        {
+            return error.InvalidResponseHeadTimeout;
+        }
+        break :blk @intCast(timeout.integer);
+    } else null;
     var mode: ToolChoiceMode = .omit;
     if (value.object.get("tool_choice_mode")) |choice| {
         if (choice != .string) return error.InvalidToolChoiceMode;
@@ -201,6 +224,7 @@ fn parse_definition(alloc: Allocator, id: []const u8, value: std.json.Value) Par
         .protocol = .@"openai-chat-completions",
         .base_url = owned_url,
         .auth = owned_auth,
+        .response_head_timeout_ms = response_head_timeout_ms,
         .tool_choice_mode = mode,
         .reviewer_model = owned_reviewer,
         .model_metadata = if (value.object.get("model_metadata")) |metadata| try parse_metadata(alloc, metadata) else &.{},
@@ -368,7 +392,7 @@ fn hash_part(hash: *std.crypto.hash.sha2.Sha256, part: []const u8) void {
 }
 
 const test_json =
-    \\{"local":{"protocol":"openai-chat-completions","base_url":"http://localhost:11434/v1/","auth":{"type":"none"}},
+    \\{"local":{"protocol":"openai-chat-completions","base_url":"http://localhost:11434/v1/","auth":{"type":"none"},"response_head_timeout_ms":300000},
     \\"router":{"protocol":"openai-chat-completions","base_url":"https://openrouter.ai/api/v1","auth":{"type":"bearer","env":"OPENROUTER_API_KEY"},"tool_choice_mode":"send","reviewer_model":"openai/review","model_metadata":{"openai/gpt-4.1":{"context_window":8192,"max_output_tokens":1024,"supports_tool_use":true,"supports_vision":false},"unknown":{}}}}
 ;
 
@@ -381,6 +405,7 @@ test "configured provider owns definitions and preserves unknown metadata" {
     try std.testing.expectEqual(@as(usize, 2), registry.definitions.len);
     const local = registry.get("local").?;
     try std.testing.expectEqual(Auth.none, local.auth);
+    try std.testing.expectEqual(@as(?u32, 300_000), local.response_head_timeout_ms);
     try std.testing.expectEqual(ToolChoiceMode.omit, local.tool_choice_mode);
     try std.testing.expect(local.reviewer_model == null);
     const chat = try local.chat_url(alloc);
@@ -447,6 +472,9 @@ test "configured provider binding identity separates name endpoint and auth slot
     changed = original;
     changed.base_url = try validate_url("https://openrouter.ai/api/v1/");
     try std.testing.expectEqual(identity, changed.binding_identity());
+    changed = original;
+    changed.response_head_timeout_ms = 300_000;
+    try std.testing.expect(!std.mem.eql(u8, &identity, &changed.binding_identity()));
 }
 
 test "configured provider duplicate keys are rejected before Value loses evidence" {
@@ -495,6 +523,9 @@ test "configured provider invalid schemas fail explicitly" {
         .{ .json = "{\"local\":{\"protocol\":\"openai-chat-completions\",\"base_url\":null}}", .err = error.InvalidBaseUrl },
         .{ .json = "{\"local\":{" ++ test_required_fields ++ ",\"secret\":\"not-allowed\"}}", .err = error.UnknownField },
         .{ .json = "{\"local\":{" ++ test_required_fields ++ ",\"tool_choice_mode\":\"auto\"}}", .err = error.InvalidToolChoiceMode },
+        .{ .json = "{\"local\":{" ++ test_required_fields ++ ",\"response_head_timeout_ms\":0}}", .err = error.InvalidResponseHeadTimeout },
+        .{ .json = "{\"local\":{" ++ test_required_fields ++ ",\"response_head_timeout_ms\":1800001}}", .err = error.InvalidResponseHeadTimeout },
+        .{ .json = "{\"local\":{" ++ test_required_fields ++ ",\"response_head_timeout_ms\":null}}", .err = error.InvalidResponseHeadTimeout },
         .{ .json = "{\"local\":{" ++ test_required_fields ++ ",\"tool_choice_mode\":null}}", .err = error.InvalidToolChoiceMode },
         .{ .json = "{\"local\":{" ++ test_required_fields ++ ",\"reviewer_model\":null}}", .err = error.InvalidModelId },
         .{ .json = "{\"local\":{" ++ test_required_fields ++ ",\"reviewer_model\":\"\"}}", .err = error.InvalidModelId },

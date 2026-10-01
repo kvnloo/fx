@@ -72,6 +72,23 @@ fx provider local
 FX_PROVIDER=openrouter FX_MODEL=openai/gpt-4.1 fx ask "review this change"
 ```
 
+Cold local models can opt into a longer first-response wait without changing remote-provider behavior:
+
+```jsonc
+{
+  "providers": {
+    "local": {
+      "protocol": "openai-chat-completions",
+      "base_url": "http://localhost:11434/v1",
+      "auth": { "type": "none" },
+      "response_head_timeout_ms": 300000
+    }
+  }
+}
+```
+
+The field is profile-owned, applies only while waiting for the HTTP response head, and defaults to 120000 ms when omitted.
+
 See [Custom model connections](https://fx.sh/docs/configure-fx/custom-model-connections) for connection JSON, model metadata, and behavior details.
 
 ## Gateway provider routing
