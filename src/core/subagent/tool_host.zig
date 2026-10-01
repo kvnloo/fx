@@ -1006,16 +1006,22 @@ pub const Runtime = struct {
         child_id: []const u8,
         work_id: []const u8,
     ) !?[]u8 {
+        // The caller is commonly the parent turn arena. Child history is
+        // temporary read scratch: reconstruct it on the host allocator and
+        // copy only the selected result into the caller-owned lifetime.
+        var scratch = std.heap.ArenaAllocator.init(self.alloc);
+        defer scratch.deinit();
+        const scratch_alloc = scratch.allocator();
         switch (self.backend) {
             .v1 => |sessions| {
-                var state = sessions.loadReadOnly(alloc, child_id) catch return null;
-                defer state.deinit(alloc);
+                var state = sessions.loadReadOnly(scratch_alloc, child_id) catch return null;
+                defer state.deinit(scratch_alloc);
                 const text = assistantTextForWork(state.history, work_id) orelse return null;
                 return @as(?[]u8, try alloc.dupe(u8, text));
             },
             .v2 => |children| {
-                const history = children.parent.store.childHistory(alloc, child_id) catch return null;
-                defer types.freeHistoryTurnSlice(alloc, history);
+                const history = children.parent.store.childHistory(scratch_alloc, child_id) catch return null;
+                defer types.freeHistoryTurnSlice(scratch_alloc, history);
                 const text = assistantTextForWork(history, work_id) orelse return null;
                 return @as(?[]u8, try alloc.dupe(u8, text));
             },
@@ -1057,11 +1063,17 @@ pub const Runtime = struct {
         sink: ?ProgressSink,
         model_capability_resolver: ?model_capabilities.Resolver,
     ) Allocator.Error!StatusPublisher {
+        // Preference lookup and capability resolution are transient. Keep them
+        // off the parent turn arena; only the rendered model string survives.
+        var scratch = std.heap.ArenaAllocator.init(self.alloc);
+        defer scratch.deinit();
+        const scratch_alloc = scratch.allocator();
+
         var model: []u8 = undefined;
         var effort: types.ReasoningEffort = undefined;
-        if (self.childPreferences(alloc, child_id)) |loaded| {
+        if (self.childPreferences(scratch_alloc, child_id)) |loaded| {
             var preferences = loaded;
-            defer preferences.deinit(alloc);
+            defer preferences.deinit(scratch_alloc);
             model = try alloc.dupe(u8, preferences.model);
             effort = preferences.effort;
         } else |err| {
@@ -1071,9 +1083,7 @@ pub const Runtime = struct {
         }
         var context_window: ?u32 = null;
         if (model_capability_resolver) |resolver| {
-            var resolve_arena = std.heap.ArenaAllocator.init(alloc);
-            defer resolve_arena.deinit();
-            if (resolver.resolve(resolve_arena.allocator(), model)) |caps| {
+            if (resolver.resolve(scratch_alloc, model)) |caps| {
                 context_window = caps.context_window;
             } else |_| {}
         }
