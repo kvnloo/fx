@@ -239,16 +239,27 @@ pub fn parse(alloc: Allocator, bytes: []const u8) !Session {
 
 pub fn stringify(alloc: Allocator, session: Session) ![]u8 {
     if (!validAccountId(session.account_id)) return error.InvalidGrokAuthSession;
-    var out: std.Io.Writer.Allocating = .init(alloc);
+    // Size the secret-bearing JSON before allocating it. Growing an
+    // allocating writer would release older plaintext token copies that the
+    // caller's final zeroAndFree cannot reach.
+    var counter: std.Io.Writer.Discarding = .init(&.{});
+    try writeSession(&counter.writer, session);
+    const exact = std.math.cast(usize, counter.fullCount()) orelse return error.OutOfMemory;
+
+    var out: std.Io.Writer.Allocating = try .initCapacity(alloc, exact);
     errdefer out.deinit();
-    try out.writer.writeAll("{\"version\":1,\"access_token\":");
-    try std.json.Stringify.value(session.access_token, .{}, &out.writer);
-    try out.writer.writeAll(",\"refresh_token\":");
-    try std.json.Stringify.value(session.refresh_token, .{}, &out.writer);
-    try out.writer.print(",\"expires_at_ms\":{d},\"account_id\":", .{session.expires_at_ms});
-    try std.json.Stringify.value(session.account_id, .{}, &out.writer);
-    try out.writer.writeAll("}\n");
+    try writeSession(&out.writer, session);
     return out.toOwnedSlice();
+}
+
+fn writeSession(writer: *std.Io.Writer, session: Session) !void {
+    try writer.writeAll("{\"version\":1,\"access_token\":");
+    try std.json.Stringify.value(session.access_token, .{}, writer);
+    try writer.writeAll(",\"refresh_token\":");
+    try std.json.Stringify.value(session.refresh_token, .{}, writer);
+    try writer.print(",\"expires_at_ms\":{d},\"account_id\":", .{session.expires_at_ms});
+    try std.json.Stringify.value(session.account_id, .{}, writer);
+    try writer.writeAll("}\n");
 }
 
 fn dupeRequiredString(alloc: Allocator, object: std.json.ObjectMap, key: []const u8) ![]u8 {
@@ -299,4 +310,62 @@ test "Grok account identity is bounded and safe for HTTP headers" {
 test "Grok session refresh deadline keeps a one minute safety margin" {
     try std.testing.expectEqual(@as(i64, 40_000), refreshDeadlineMs(100_000));
     try std.testing.expectEqual(@as(i64, 0), refreshDeadlineMs(10_000));
+}
+
+
+const SecretReleaseCounter = struct {
+    child: std.mem.Allocator,
+    releases: usize = 0,
+
+    fn allocFn(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *SecretReleaseCounter = @ptrCast(@alignCast(ctx));
+        return self.child.rawAlloc(len, alignment, ra);
+    }
+
+    fn resizeFn(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) bool {
+        const self: *SecretReleaseCounter = @ptrCast(@alignCast(ctx));
+        return self.child.rawResize(memory, alignment, new_len, ra);
+    }
+
+    fn remapFn(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8 {
+        const self: *SecretReleaseCounter = @ptrCast(@alignCast(ctx));
+        return self.child.rawRemap(memory, alignment, new_len, ra);
+    }
+
+    fn freeFn(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const self: *SecretReleaseCounter = @ptrCast(@alignCast(ctx));
+        self.releases += 1;
+        self.child.rawFree(memory, alignment, ra);
+    }
+
+    const vtable: std.mem.Allocator.VTable = .{
+        .alloc = allocFn,
+        .resize = resizeFn,
+        .remap = remapFn,
+        .free = freeFn,
+    };
+
+    fn allocator(self: *SecretReleaseCounter) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+};
+
+test "auth session stringify abandons no secret-bearing buffer" {
+    var counter: SecretReleaseCounter = .{ .child = std.testing.allocator };
+    const alloc = counter.allocator();
+
+    var session = Session{
+        .access_token = try alloc.dupe(u8, "header." ++ "a" ** 200 ++ ".signature"),
+        .refresh_token = try alloc.dupe(u8, "refresh." ++ "b" ** 200),
+        .expires_at_ms = 1234,
+        .account_id = try alloc.dupe(u8, "1234567890"),
+    };
+    defer session.deinit(alloc);
+
+    counter.releases = 0;
+    const text = try stringify(alloc, session);
+    const releases_during_stringify = counter.releases;
+    defer secret.zeroAndFree(alloc, text);
+
+    try std.testing.expectEqual(@as(usize, 0), releases_during_stringify);
 }
