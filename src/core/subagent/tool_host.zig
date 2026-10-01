@@ -1006,16 +1006,22 @@ pub const Runtime = struct {
         child_id: []const u8,
         work_id: []const u8,
     ) !?[]u8 {
+        // The caller is commonly the parent turn arena. Child history is
+        // temporary read scratch: reconstruct it on the host allocator and
+        // copy only the selected result into the caller-owned lifetime.
+        var scratch = std.heap.ArenaAllocator.init(self.alloc);
+        defer scratch.deinit();
+        const scratch_alloc = scratch.allocator();
         switch (self.backend) {
             .v1 => |sessions| {
-                var state = sessions.loadReadOnly(alloc, child_id) catch return null;
-                defer state.deinit(alloc);
+                var state = sessions.loadReadOnly(scratch_alloc, child_id) catch return null;
+                defer state.deinit(scratch_alloc);
                 const text = assistantTextForWork(state.history, work_id) orelse return null;
                 return @as(?[]u8, try alloc.dupe(u8, text));
             },
             .v2 => |children| {
-                const history = children.parent.store.childHistory(alloc, child_id) catch return null;
-                defer types.freeHistoryTurnSlice(alloc, history);
+                const history = children.parent.store.childHistory(scratch_alloc, child_id) catch return null;
+                defer types.freeHistoryTurnSlice(scratch_alloc, history);
                 const text = assistantTextForWork(history, work_id) orelse return null;
                 return @as(?[]u8, try alloc.dupe(u8, text));
             },
@@ -1057,11 +1063,17 @@ pub const Runtime = struct {
         sink: ?ProgressSink,
         model_capability_resolver: ?model_capabilities.Resolver,
     ) Allocator.Error!StatusPublisher {
+        // Preference lookup and capability resolution are transient. Keep them
+        // off the parent turn arena; only the rendered model string survives.
+        var scratch = std.heap.ArenaAllocator.init(self.alloc);
+        defer scratch.deinit();
+        const scratch_alloc = scratch.allocator();
+
         var model: []u8 = undefined;
         var effort: types.ReasoningEffort = undefined;
-        if (self.childPreferences(alloc, child_id)) |loaded| {
+        if (self.childPreferences(scratch_alloc, child_id)) |loaded| {
             var preferences = loaded;
-            defer preferences.deinit(alloc);
+            defer preferences.deinit(scratch_alloc);
             model = try alloc.dupe(u8, preferences.model);
             effort = preferences.effort;
         } else |err| {
@@ -1071,9 +1083,7 @@ pub const Runtime = struct {
         }
         var context_window: ?u32 = null;
         if (model_capability_resolver) |resolver| {
-            var resolve_arena = std.heap.ArenaAllocator.init(alloc);
-            defer resolve_arena.deinit();
-            if (resolver.resolve(resolve_arena.allocator(), model)) |caps| {
+            if (resolver.resolve(scratch_alloc, model)) |caps| {
                 context_window = caps.context_window;
             } else |_| {}
         }
@@ -1176,6 +1186,111 @@ fn checkYieldedOwnership(alloc: Allocator) !void {
     const retained = try runtime.prepareYielded(arena.allocator());
     try std.testing.expect(retained[0].delivered);
     try std.testing.expectEqualStrings("saved result", retained[0].body);
+}
+
+test "subagent session reads release scratch before returning to parent arena" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
+    defer alloc.free(home);
+    var sessions = try session_store.Store.initFromHome(alloc, home, home);
+    defer sessions.deinit(alloc);
+
+    const large_text = try alloc.alloc(u8, 512 * 1024);
+    defer alloc.free(large_text);
+    @memset(large_text, 'x');
+    var history = [_]types.HistoryTurn{
+        .{ .assistant = .{
+            .user = .{ .text = @constCast("old task"), .work_id = @constCast("old-work") },
+            .assistant = large_text,
+        } },
+        .{ .assistant = .{
+            .user = .{ .text = @constCast("new task"), .work_id = @constCast("target-work") },
+            .assistant = @constCast("SMALL_RESULT"),
+        } },
+    };
+    var loaded = try sessions.startWritableSession(alloc, .{
+        .id = @constCast("memory-probe-child"),
+        .origin_workspace_root = @constCast(home),
+        .workspace_root = @constCast(home),
+        .created_at_ms = 1,
+        .updated_at_ms = 1,
+        .conversation_language = session.ConversationLanguage.literal("en"),
+        .preferences = .{
+            .provider = .gateway,
+            .model = @constCast("child-model"),
+            .effort = .auto,
+            .fast_mode = false,
+        },
+        .history = &history,
+        .total_input_tokens = 0,
+        .total_output_tokens = 0,
+    });
+    defer loaded.deinit(alloc);
+
+    var runtime = Runtime{
+        .alloc = alloc,
+        .backend = .{ .v1 = &sessions },
+        .root_id = undefined,
+        .host_authority = undefined,
+        .child_runner = undefined,
+        .approvals = undefined,
+        .authority_resolver = undefined,
+        .managed = undefined,
+    };
+    const fallback = Defaults{
+        .provider = .gateway,
+        .model = "fallback",
+        .effort = .auto,
+        .conversation_language = session.ConversationLanguage.literal("en"),
+    };
+
+    var turn = std.heap.ArenaAllocator.init(alloc);
+    defer turn.deinit();
+    for (0..8) |_| {
+        const result = (try runtime.managedResultText(
+            turn.allocator(),
+            loaded.active_id,
+            "target-work",
+        )).?;
+        try std.testing.expectEqualStrings("SMALL_RESULT", result);
+        var status = try runtime.startStatusPublisher(
+            turn.allocator(),
+            loaded.active_id,
+            fallback,
+            null,
+            null,
+        );
+        try std.testing.expectEqualStrings("child-model", status.model);
+        status.deinit(turn.allocator());
+    }
+    // The 512 KiB old turn is read eight times, but only the selected result
+    // and model strings may survive in the caller arena.
+    try std.testing.expect(turn.queryCapacity() < 64 * 1024);
+
+    const Resolver = struct {
+        fn resolve(
+            _: *anyopaque,
+            scratch: Allocator,
+            _: []const u8,
+        ) model_capabilities.ResolveError!model_capabilities.Capabilities {
+            const bytes = scratch.alloc(u8, 512 * 1024) catch return error.Cancelled;
+            @memset(bytes, 'x');
+            return .{ .context_window = 128_000 };
+        }
+    };
+    var resolver_context: u8 = 0;
+    var resolved = try runtime.startStatusPublisher(
+        turn.allocator(),
+        loaded.active_id,
+        fallback,
+        null,
+        .{ .ctx = &resolver_context, .resolve_fn = Resolver.resolve },
+    );
+    defer resolved.deinit(turn.allocator());
+    try std.testing.expectEqual(@as(?u32, 128_000), resolved.context_window);
+    try std.testing.expect(turn.queryCapacity() < 64 * 1024);
 }
 
 test "subagent yielded identity is owned and allocation failures do not leak" {
