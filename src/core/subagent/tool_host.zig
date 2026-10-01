@@ -1188,6 +1188,111 @@ fn checkYieldedOwnership(alloc: Allocator) !void {
     try std.testing.expectEqualStrings("saved result", retained[0].body);
 }
 
+test "subagent session reads release scratch before returning to parent arena" {
+    const alloc = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const home = try io_mod.dirRealpathAlloc(alloc, tmp.dir, ".");
+    defer alloc.free(home);
+    var sessions = try session_store.Store.initFromHome(alloc, home, home);
+    defer sessions.deinit(alloc);
+
+    const large_text = try alloc.alloc(u8, 512 * 1024);
+    defer alloc.free(large_text);
+    @memset(large_text, 'x');
+    var history = [_]types.HistoryTurn{
+        .{ .assistant = .{
+            .user = .{ .text = @constCast("old task"), .work_id = @constCast("old-work") },
+            .assistant = large_text,
+        } },
+        .{ .assistant = .{
+            .user = .{ .text = @constCast("new task"), .work_id = @constCast("target-work") },
+            .assistant = @constCast("SMALL_RESULT"),
+        } },
+    };
+    var loaded = try sessions.startWritableSession(alloc, .{
+        .id = @constCast("memory-probe-child"),
+        .origin_workspace_root = @constCast(home),
+        .workspace_root = @constCast(home),
+        .created_at_ms = 1,
+        .updated_at_ms = 1,
+        .conversation_language = session.ConversationLanguage.literal("en"),
+        .preferences = .{
+            .provider = .gateway,
+            .model = @constCast("child-model"),
+            .effort = .auto,
+            .fast_mode = false,
+        },
+        .history = &history,
+        .total_input_tokens = 0,
+        .total_output_tokens = 0,
+    });
+    defer loaded.deinit(alloc);
+
+    var runtime = Runtime{
+        .alloc = alloc,
+        .backend = .{ .v1 = &sessions },
+        .root_id = undefined,
+        .host_authority = undefined,
+        .child_runner = undefined,
+        .approvals = undefined,
+        .authority_resolver = undefined,
+        .managed = undefined,
+    };
+    const fallback = Defaults{
+        .provider = .gateway,
+        .model = "fallback",
+        .effort = .auto,
+        .conversation_language = session.ConversationLanguage.literal("en"),
+    };
+
+    var turn = std.heap.ArenaAllocator.init(alloc);
+    defer turn.deinit();
+    for (0..8) |_| {
+        const result = (try runtime.managedResultText(
+            turn.allocator(),
+            loaded.active_id,
+            "target-work",
+        )).?;
+        try std.testing.expectEqualStrings("SMALL_RESULT", result);
+        var status = try runtime.startStatusPublisher(
+            turn.allocator(),
+            loaded.active_id,
+            fallback,
+            null,
+            null,
+        );
+        try std.testing.expectEqualStrings("child-model", status.model);
+        status.deinit(turn.allocator());
+    }
+    // The 512 KiB old turn is read eight times, but only the selected result
+    // and model strings may survive in the caller arena.
+    try std.testing.expect(turn.queryCapacity() < 64 * 1024);
+
+    const Resolver = struct {
+        fn resolve(
+            _: *anyopaque,
+            scratch: Allocator,
+            _: []const u8,
+        ) model_capabilities.ResolveError!model_capabilities.Capabilities {
+            const bytes = scratch.alloc(u8, 512 * 1024) catch return error.Cancelled;
+            @memset(bytes, 'x');
+            return .{ .context_window = 128_000 };
+        }
+    };
+    var resolver_context: u8 = 0;
+    var resolved = try runtime.startStatusPublisher(
+        turn.allocator(),
+        loaded.active_id,
+        fallback,
+        null,
+        .{ .ctx = &resolver_context, .resolve_fn = Resolver.resolve },
+    );
+    defer resolved.deinit(turn.allocator());
+    try std.testing.expectEqual(@as(?u32, 128_000), resolved.context_window);
+    try std.testing.expect(turn.queryCapacity() < 64 * 1024);
+}
+
 test "subagent yielded identity is owned and allocation failures do not leak" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, checkYieldedOwnership, .{});
 }
