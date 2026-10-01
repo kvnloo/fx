@@ -47,3 +47,21 @@ The CLI keeps its existing local credential path. No network broker becomes mand
 ## Kill criteria
 
 Reject any design that stores credential handles in project config, expands project authority, or makes a remote broker required for ordinary CLI use.
+
+
+## 2026-10-01 current-main audit
+
+The credential program now has concrete current-main evidence:
+
+- **Expiry arithmetic still reproduces:** Grok and ChatGPT session refresh deadlines used unchecked subtraction on untrusted stored integers. Downstream #16 ports the bounded saturating fix from upstream #446/#756.
+- **Persisted-session buffer growth still reproduces structurally:** both session serializers grew an allocating writer after access/refresh tokens were present. Downstream #17 ports the exact-capacity strategy from upstream #379.
+- **Request-side secret buffers remain:** OAuth refresh/revoke and Grok/ChatGPT refresh/revoke paths still use growing allocating writers while holding credentials. This is the next independent slice.
+- **Old refresh double-free #437 is no longer a current-main port candidate:** ownership moved into `refresh_replacement()`. Its local cleanup is disarmed on successful return; the returned replacement then owns access token, refresh token, and account id, so the outer `replacement.deinit()` is the correct save-failure cleanup. Do not apply the stale one-line patch blindly.
+- Host-broker work such as upstream #626 remains architectural prior art, not a dependency for local CLI correctness.
+
+### Implementation queue
+
+1. #16 — corrupt expiry arithmetic.
+2. #17 — exact-capacity persisted auth-session serialization.
+3. Next — exact-capacity + explicit zeroization for secret-bearing request bodies.
+4. Then reconsider a host-broker seam only if libfx/sandbox evidence requires it.
