@@ -504,8 +504,13 @@ fn refreshSession(
     session: *grok_session.Session,
 ) !void {
     try mutation.requireWritable();
-    var body: std.Io.Writer.Allocating = .init(alloc);
+    var body: std.Io.Writer.Allocating = try .initCapacity(alloc, oauth.formCapacity(&.{
+        "grant_type", "refresh_token",
+        "client_id", client_id,
+        "refresh_token", session.refresh_token,
+    }));
     defer body.deinit();
+    defer secret.zero(body.written());
     var form: FormBody = .{};
     try form.append(&body.writer, "grant_type", "refresh_token");
     try form.append(&body.writer, "client_id", client_id);
@@ -649,8 +654,15 @@ fn exchangeAuthorizationCodeForRedirectWithBounds(
     deadline: ?std.Io.Clock.Timestamp,
 ) !TokenSet {
     var form: FormBody = .{};
-    var body: std.Io.Writer.Allocating = .init(alloc);
+    var body: std.Io.Writer.Allocating = try .initCapacity(alloc, oauth.formCapacity(&.{
+        "grant_type", "authorization_code",
+        "client_id", client_id,
+        "code", authorization_code,
+        "code_verifier", code_verifier,
+        "redirect_uri", redirect_uri,
+    }));
     defer body.deinit();
+    defer secret.zero(body.written());
     try form.append(&body.writer, "grant_type", "authorization_code");
     try form.append(&body.writer, "client_id", client_id);
     try form.append(&body.writer, "code", authorization_code);
@@ -707,7 +719,7 @@ fn fetchAccountId(
 ) ![]u8 {
     const endpoint_url = try configuredEndpoint(alloc, e2e_userinfo_url_env, userinfo_url);
     defer alloc.free(endpoint_url);
-    const authorization = try std.fmt.allocPrint(alloc, "Bearer {s}", .{access_token});
+    const authorization = try secret.bearerHeaderAlloc(alloc, access_token);
     defer secret.zeroAndFree(alloc, authorization);
     var response = try transport.execute(alloc, .{
         .method = .get,
@@ -734,8 +746,12 @@ fn revokeToken(
 ) !void {
     const endpoint_url = try configuredEndpoint(alloc, e2e_revoke_url_env, revoke_url);
     defer alloc.free(endpoint_url);
-    var body: std.Io.Writer.Allocating = .init(alloc);
+    var body: std.Io.Writer.Allocating = try .initCapacity(alloc, oauth.formCapacity(&.{
+        "token", token,
+        "client_id", client_id,
+    }));
     defer body.deinit();
+    defer secret.zero(body.written());
     var form: FormBody = .{};
     try form.append(&body.writer, "token", token);
     try form.append(&body.writer, "client_id", client_id);
