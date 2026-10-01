@@ -122,7 +122,7 @@ pub fn inspectDirectory(alloc: Allocator, root_path: []const u8) !Inspection {
     var root = try io_mod.openDirAbsoluteNoFollow(canonical_root, .{ .iterate = true });
     defer root.close(io_mod.getIo());
 
-    var manifest_file = try io_mod.openExistingReadOnlyRegularFile(&root, "plugin.json", .no_follow);
+    var manifest_file = try io_mod.openExistingReadOnlyRegularFile(root, "plugin.json", .no_follow);
     defer manifest_file.close(io_mod.getIo());
     const stat = try manifest_file.stat(io_mod.getIo());
     if (stat.size > max_manifest_bytes) return error.ManifestTooLarge;
