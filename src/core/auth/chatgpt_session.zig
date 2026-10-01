@@ -307,3 +307,61 @@ test "ChatGPT auth session rejects account identifiers unsafe for HTTP headers" 
     defer session.deinit(std.testing.allocator);
     return error.TestExpectedInvalidChatGptAuthSession;
 }
+
+
+const SecretReleaseCounter = struct {
+    child: std.mem.Allocator,
+    releases: usize = 0,
+
+    fn allocFn(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *SecretReleaseCounter = @ptrCast(@alignCast(ctx));
+        return self.child.rawAlloc(len, alignment, ra);
+    }
+
+    fn resizeFn(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) bool {
+        const self: *SecretReleaseCounter = @ptrCast(@alignCast(ctx));
+        return self.child.rawResize(memory, alignment, new_len, ra);
+    }
+
+    fn remapFn(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8 {
+        const self: *SecretReleaseCounter = @ptrCast(@alignCast(ctx));
+        return self.child.rawRemap(memory, alignment, new_len, ra);
+    }
+
+    fn freeFn(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const self: *SecretReleaseCounter = @ptrCast(@alignCast(ctx));
+        self.releases += 1;
+        self.child.rawFree(memory, alignment, ra);
+    }
+
+    const vtable: std.mem.Allocator.VTable = .{
+        .alloc = allocFn,
+        .resize = resizeFn,
+        .remap = remapFn,
+        .free = freeFn,
+    };
+
+    fn allocator(self: *SecretReleaseCounter) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+};
+
+test "auth session stringify abandons no secret-bearing buffer" {
+    var counter: SecretReleaseCounter = .{ .child = std.testing.allocator };
+    const alloc = counter.allocator();
+
+    var session = Session{
+        .access_token = try alloc.dupe(u8, "header." ++ "a" ** 200 ++ ".signature"),
+        .refresh_token = try alloc.dupe(u8, "refresh." ++ "b" ** 200),
+        .expires_at_ms = 1234,
+        .account_id = try alloc.dupe(u8, "acct_1234567890"),
+    };
+    defer session.deinit(alloc);
+
+    counter.releases = 0;
+    const text = try stringify(alloc, session);
+    const releases_during_stringify = counter.releases;
+    defer secret.zeroAndFree(alloc, text);
+
+    try std.testing.expectEqual(@as(usize, 0), releases_during_stringify);
+}
