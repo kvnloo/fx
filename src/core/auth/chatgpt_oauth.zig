@@ -392,6 +392,14 @@ fn takeAccess(session: *chatgpt_session.Session) Access {
     };
 }
 
+/// Upper bound on the JSON refresh body. JSON escaping expands one byte to
+/// at most six bytes, so reserving this amount prevents reallocations after the
+/// refresh token has been written.
+fn refreshBodyCapacity(refresh_token: []const u8) usize {
+    const fixed = "{\"client_id\":\"\",\"grant_type\":\"refresh_token\",\"refresh_token\":\"\"}".len;
+    return fixed + (client_id.len + refresh_token.len) * 6;
+}
+
 fn refreshSession(
     alloc: Allocator,
     transport: oauth_transport.Provider,
@@ -399,8 +407,12 @@ fn refreshSession(
     session: *chatgpt_session.Session,
 ) !void {
     try mutation.requireWritable();
-    var body: std.Io.Writer.Allocating = .init(alloc);
+    var body: std.Io.Writer.Allocating = try .initCapacity(
+        alloc,
+        refreshBodyCapacity(session.refresh_token),
+    );
     defer body.deinit();
+    defer secret.zero(body.written());
     try body.writer.writeAll("{\"client_id\":");
     try std.json.Stringify.value(client_id, .{}, &body.writer);
     try body.writer.writeAll(",\"grant_type\":\"refresh_token\",\"refresh_token\":");
@@ -580,8 +592,15 @@ fn exchangeAuthorizationCodeForRedirectWithBounds(
     deadline: ?std.Io.Clock.Timestamp,
 ) !TokenSet {
     var form: FormBody = .{};
-    var body: std.Io.Writer.Allocating = .init(alloc);
+    var body: std.Io.Writer.Allocating = try .initCapacity(alloc, oauth.formCapacity(&.{
+        "grant_type", "authorization_code",
+        "client_id", client_id,
+        "code", authorization_code,
+        "code_verifier", code_verifier,
+        "redirect_uri", redirect_uri,
+    }));
     defer body.deinit();
+    defer secret.zero(body.written());
     try form.append(&body.writer, "grant_type", "authorization_code");
     try form.append(&body.writer, "client_id", client_id);
     try form.append(&body.writer, "code", authorization_code);
