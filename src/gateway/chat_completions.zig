@@ -126,6 +126,11 @@ fn phase_deadline(milliseconds: i64, caller: ?std.Io.Clock.Timestamp) std.Io.Clo
     return phase;
 }
 
+fn response_head_timeout_ms(definition: *const definitions.Definition) i64 {
+    return @intCast(definition.response_head_timeout_ms orelse
+        definitions.default_response_head_timeout_ms);
+}
+
 fn post(alloc: Allocator, definition: *const definitions.Definition, request: streams.ModelRequest, token: ?[]const u8, payload: []const u8) !streams.Result {
     const url = try definition.chat_url(alloc);
     defer alloc.free(url);
@@ -147,7 +152,7 @@ fn post(alloc: Allocator, definition: *const definitions.Definition, request: st
     const http = &opened.request.?;
     var watch: client_mod.CancelWatch = .{};
     defer watch.stop();
-    const head_deadline = phase_deadline(120_000, request.deadline);
+    const head_deadline = phase_deadline(response_head_timeout_ms(definition), request.deadline);
     if (http.connection) |connection| try watch.start(request.cancel_flag, head_deadline, connection.stream_writer.stream);
     http.transfer_encoding = .{ .content_length = payload.len };
     var buffer: [8192]u8 = undefined;
@@ -236,6 +241,29 @@ fn fetch_catalog(raw: ?*anyopaque, alloc: Allocator, input: catalog.FetchInput) 
         try entries.append(alloc, entry);
     }
     return .{ .catalog = entries };
+}
+
+test "configured response head timeout preserves the default and accepts an override" {
+    const alloc = std.testing.allocator;
+    var defaults = try definitions.Registry.parse_json(
+        alloc,
+        \\{"local":{"protocol":"openai-chat-completions","base_url":"http://localhost:1234/v1","auth":{"type":"none"}}}
+    );
+    defer defaults.deinit(alloc);
+    try std.testing.expectEqual(
+        @as(i64, definitions.default_response_head_timeout_ms),
+        response_head_timeout_ms(defaults.get("local").?),
+    );
+
+    var extended = try definitions.Registry.parse_json(
+        alloc,
+        \\{"local":{"protocol":"openai-chat-completions","base_url":"http://localhost:1234/v1","auth":{"type":"none"},"response_head_timeout_ms":300000}}
+    );
+    defer extended.deinit(alloc);
+    try std.testing.expectEqual(
+        @as(i64, 300_000),
+        response_head_timeout_ms(extended.get("local").?),
+    );
 }
 
 test "configured capability lookup matches catalog projection and preserves unknowns" {
