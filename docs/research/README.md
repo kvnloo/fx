@@ -42,3 +42,17 @@ Downstream-only tracker. Nothing here is approved for upstream promotion.
 Each draft must first produce a minimal deterministic experiment, explicit baseline, acceptance criteria, kill criteria, and current-main rebase.
 
 Promote only the smallest independently useful slice. Keep orchestration, research memory, evaluation, routing authority, and recursive supervision outside fx core.
+
+
+## Current-main implementation children — 2026-10-01
+
+- #14 — bound subagent session-read scratch; current-main implementation of the useful #3 ownership slice.
+- #15 — optional configured-provider response-head timeout; first concrete child of #5 / upstream #902.
+- #16 — saturating Grok/ChatGPT auth expiry arithmetic; current-main port with upstream provenance.
+- #17 — exact-capacity Grok/ChatGPT auth-session serialization; prevents abandoned plaintext token buffers.
+- #8 was revised after the sessions-v2 audit: extend the existing durable log if needed; do not add a second journal.
+
+### Superseded/stale ideas
+
+- Old PR #3 auto-closed when its branch was rebased to current main; #14 is its implementation successor.
+- The old refresh ownership fix from upstream #437 is not copied: current `refresh_replacement()` ownership makes its outer composite cleanup correct.
