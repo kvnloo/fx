@@ -127,8 +127,8 @@ fn phase_deadline(milliseconds: i64, caller: ?std.Io.Clock.Timestamp) std.Io.Clo
 }
 
 fn response_head_timeout_ms(definition: *const definitions.Definition) i64 {
-    return @intCast(definition.response_head_timeout_ms orelse
-        definitions.default_response_head_timeout_ms);
+    const value = definition.response_head_timeout_ms orelse definitions.default_response_head_timeout_ms;
+    return @intCast(value);
 }
 
 fn post(alloc: Allocator, definition: *const definitions.Definition, request: streams.ModelRequest, token: ?[]const u8, payload: []const u8) !streams.Result {
