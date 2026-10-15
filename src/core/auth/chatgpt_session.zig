@@ -308,7 +308,6 @@ test "ChatGPT auth session rejects account identifiers unsafe for HTTP headers" 
     return error.TestExpectedInvalidChatGptAuthSession;
 }
 
-
 const SecretReleaseCounter = struct {
     child: std.mem.Allocator,
     releases: usize = 0,
