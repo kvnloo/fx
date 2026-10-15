@@ -33,7 +33,14 @@ const server = createServer((request, response) => {
       assert.ok(lookup, `host tool was not advertised to the model: ${JSON.stringify(payload.tools)}`);
       assert.equal(lookup.inputSchema.properties.key.type, "string");
       response.end([
-        'data: {"type":"tool-call","toolCallId":"call_1","toolName":"lookup","input":{"key":"alpha"}}',
+        // The gateway sends pretty-printed JSON as a string. Its newline
+        // whitespace must stay inside one native JSON-RPC output frame.
+        `data: ${JSON.stringify({
+          type: "tool-call",
+          toolCallId: "call_1",
+          toolName: "lookup",
+          input: '{\n  "key": "alpha"\n}',
+        })}`,
         'data: {"type":"finish","finishReason":{"unified":"tool-calls","raw":"tool-calls"},"usage":{"inputTokens":{"total":1},"outputTokens":{"total":1}}}',
         "data: [DONE]",
         "",
