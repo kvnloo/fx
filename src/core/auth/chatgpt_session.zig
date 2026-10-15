@@ -297,7 +297,6 @@ test "ChatGPT session treats extreme stored expiry as expired" {
     try std.testing.expect(session.expired(0));
 }
 
-
 test "ChatGPT auth session rejects account identifiers unsafe for HTTP headers" {
     var session = parse(
         std.testing.allocator,
