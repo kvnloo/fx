@@ -4972,7 +4972,6 @@ test {
     _ = @import("gateway/host_stream_provider.zig");
 }
 
-
 test "Agent Plugins manifest inspector participates in core tests" {
     _ = plugin_manifest;
 }
