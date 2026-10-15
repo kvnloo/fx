@@ -312,7 +312,6 @@ test "Grok session refresh deadline keeps a one minute safety margin" {
     try std.testing.expectEqual(@as(i64, 0), refreshDeadlineMs(10_000));
 }
 
-
 const SecretReleaseCounter = struct {
     child: std.mem.Allocator,
     releases: usize = 0,
