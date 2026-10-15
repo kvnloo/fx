@@ -312,4 +312,3 @@ test "Grok session treats extreme stored expiry as expired" {
     defer session.deinit(alloc);
     try std.testing.expect(session.expired(0));
 }
-
