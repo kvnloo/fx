@@ -82,6 +82,7 @@ try {
       },
       async execute(input, { signal }) {
         assert.equal(signal.aborted, false);
+        assert.deepEqual(input, { key: "alpha" });
         toolCalls += 1;
         return `value:${input.key}`;
       },
