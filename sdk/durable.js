@@ -904,7 +904,12 @@ function createWorldBackend(world, durability) {
           await world.events.create(runId, {
             eventType: "run_created",
             ...spec,
-            eventData: { deploymentId, workflowName: "libfx/session", input: encoder.encode("{}") },
+            eventData: {
+              deploymentId,
+              workflowName: "libfx/session",
+              input: encoder.encode("{}"),
+              executionContext: { queueNamespace: "libfx" },
+            },
           });
         } catch (error) {
           // Another worker created it first.
