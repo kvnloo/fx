@@ -33,7 +33,12 @@ const server = createServer((request, response) => {
       assert.ok(lookup, `host tool was not advertised to the model: ${JSON.stringify(payload.tools)}`);
       assert.equal(lookup.inputSchema.properties.key.type, "string");
       response.end([
-        'data: {"type":"tool-call","toolCallId":"call_1","toolName":"lookup","input":{"key":"alpha"}}',
+        `data: ${JSON.stringify({
+          type: "tool-call",
+          toolCallId: "call_1",
+          toolName: "lookup",
+          input: JSON.stringify({ key: "alpha" }, null, 2),
+        })}`,
         'data: {"type":"finish","finishReason":{"unified":"tool-calls","raw":"tool-calls"},"usage":{"inputTokens":{"total":1},"outputTokens":{"total":1}}}',
         "data: [DONE]",
         "",
@@ -75,6 +80,7 @@ try {
       },
       async execute(input, { signal }) {
         assert.equal(signal.aborted, false);
+        assert.deepEqual(input, { key: "alpha" });
         toolCalls += 1;
         return `value:${input.key}`;
       },
