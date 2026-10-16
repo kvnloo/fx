@@ -2449,8 +2449,10 @@ fn requestAcpPermission(
 }
 
 fn writeValidatedToolArguments(alloc: Allocator, writer: *std.Io.Writer, arguments_json: []const u8) !void {
-    var parsed = std.json.parseFromSlice(std.json.Value, alloc, arguments_json, .{}) catch
-        return error.InvalidToolArgumentsJson;
+    var parsed = std.json.parseFromSlice(std.json.Value, alloc, arguments_json, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidToolArgumentsJson,
+    };
     defer parsed.deinit();
     try std.json.Stringify.value(parsed.value, .{}, writer);
 }
@@ -4435,6 +4437,15 @@ test "ACP permission arguments are validated and reserialized before emission" {
         writeValidatedToolArguments(alloc, &malformed.writer, "{\"path\":}"),
     );
     try std.testing.expectEqual(@as(usize, 0), malformed.written().len);
+
+    var exhausted = std.testing.FailingAllocator.init(alloc, .{ .fail_index = 0 });
+    var oom_out: std.Io.Writer.Allocating = .init(alloc);
+    defer oom_out.deinit();
+    try std.testing.expectError(
+        error.OutOfMemory,
+        writeValidatedToolArguments(exhausted.allocator(), &oom_out.writer, "{\"path\":\"README.md\"}"),
+    );
+    try std.testing.expectEqual(@as(usize, 0), oom_out.written().len);
 }
 
 test "acp exposes web_search progress updates" {
