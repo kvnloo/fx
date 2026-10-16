@@ -654,7 +654,12 @@ fn callHostTool(
     params.writer.writeAll(",\"toolCallId\":") catch return error.OutOfMemory;
     std.json.Stringify.value(call_id, .{}, &params.writer) catch return error.OutOfMemory;
     params.writer.writeAll(",\"input\":") catch return error.OutOfMemory;
-    params.writer.writeAll(arguments_json) catch return error.OutOfMemory;
+    // The host transport frames JSON-RPC messages on newlines. Validate and
+    // compact model-generated arguments before inserting them into the frame.
+    writeValidatedToolArguments(alloc, &params.writer, arguments_json) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidToolArguments,
+    };
     params.writer.writeByte('}') catch return error.OutOfMemory;
     state.writer.writeRequest(
         alloc,
@@ -4408,6 +4413,20 @@ test "ACP permission arguments are validated and reserialized before emission" {
 
     try writeValidatedToolArguments(alloc, &out.writer, " { \"path\" : \"README.md\" } ");
     try std.testing.expectEqualStrings("{\"path\":\"README.md\"}", out.written());
+
+    // Raw newlines inside JSON whitespace must never split a JSON-RPC frame;
+    // newlines within a string value remain escaped in the serialized JSON.
+    var multiline: std.Io.Writer.Allocating = .init(alloc);
+    defer multiline.deinit();
+    try writeValidatedToolArguments(
+        alloc,
+        &multiline.writer,
+        "{\n  \"path\": \"README.md\",\n  \"line\": \"first\\nsecond\"\n}",
+    );
+    try std.testing.expectEqualStrings(
+        "{\"path\":\"README.md\",\"line\":\"first\\nsecond\"}",
+        multiline.written(),
+    );
 
     var malformed: std.Io.Writer.Allocating = .init(alloc);
     defer malformed.deinit();
