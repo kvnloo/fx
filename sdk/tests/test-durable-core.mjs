@@ -854,6 +854,12 @@ if (durabilityKind === "queue") {
     // The worker's chained entries went in-band, each expecting the count
     // the one before it left, from the run's creation on; its input, turn end
     // and any checkpoint went out-of-band.
+    const createdRuns = fence.creates.filter(
+      ({ runId, data }) => runId === session.id && data?.eventType === "run_created",
+    );
+    assert.equal(createdRuns.length, 1);
+    assert.equal(createdRuns[0].data.eventData.workflowName, "libfx/session");
+    assert.deepEqual(createdRuns[0].data.eventData.executionContext, { queueNamespace: "libfx" });
     const writes = fence.creates
       .filter((create) => create.runId === session.id && create.data?.eventType === "step_created")
       .map((create) => ({ entry: JSON.parse(decoder.decode(create.data.eventData.input)), params: create.params ?? {} }));
