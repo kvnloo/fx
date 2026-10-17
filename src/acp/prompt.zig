@@ -657,7 +657,8 @@ fn callHostTool(
     // The host transport frames JSON-RPC messages on newlines. Validate and
     // compact model-generated arguments before inserting them into the frame.
     writeValidatedToolArguments(alloc, &params.writer, arguments_json) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
+        // The allocating writer reports buffer exhaustion as WriteFailed.
+        error.OutOfMemory, error.WriteFailed => return error.OutOfMemory,
         else => return error.InvalidToolArguments,
     };
     params.writer.writeByte('}') catch return error.OutOfMemory;
@@ -4406,6 +4407,45 @@ test "mapToolKind maps surviving tools" {
     try std.testing.expectEqual(acp_types.ToolCallKind.read, mapToolKind("glob_files"));
     try std.testing.expectEqual(acp_types.ToolCallKind.other, mapToolKind("skill"));
     try std.testing.expectEqual(acp_types.ToolCallKind.other, mapToolKind("install_skill"));
+}
+
+test "ACP host tool serialization preserves allocation failures" {
+    const Case = struct {
+        fn respond(raw: ?*anyopaque, frame: []const u8) !void {
+            const state: *server.ServerState = @ptrCast(@alignCast(raw.?));
+            const parsed = try std.json.parseFromSlice(std.json.Value, state.alloc, frame, .{});
+            defer parsed.deinit();
+            const object = parsed.value.object;
+            if (!std.mem.eql(u8, object.get("method").?.string, "libfx/tool_call")) return;
+            const id: u64 = @intCast(object.get("id").?.integer);
+            // A cancelled response ends the successful serialization probe
+            // without adding unrelated result-parsing allocations to the sweep.
+            state.pending_outbound.getPtr(id).?.response = .{ .cancelled = true };
+        }
+
+        fn run(alloc: Allocator, input: []const u8) !void {
+            var state = server.ServerState{
+                .alloc = std.testing.allocator,
+                .cfg = undefined,
+                .writer = jsonrpc.Writer.init(),
+            };
+            defer state.pending_outbound.deinit(state.alloc);
+            state.writer = jsonrpc.Writer.initCallback(&state, respond);
+
+            const result = callHostTool(&state, alloc, "inspect", "call_1", input, 1024, null) catch |err| {
+                try std.testing.expectEqual(@as(usize, 0), state.pending_outbound.count());
+                if (err == error.Cancelled) return;
+                return err;
+            };
+            result.deinit(alloc);
+            return error.ExpectedCancelledResponse;
+        }
+    };
+
+    const padding: [1024]u8 = @splat('x');
+    const input = "{\n \"text\":\"first\\nsecond\",\n \"padding\":\"" ++ padding ++ "\",\n \"items\":[1,true,null,{\"path\":\"README.md\"}]\n}";
+    try std.testing.checkAllAllocationFailures(testing_allocator.no_resize, Case.run, .{input});
+    try std.testing.expectError(error.InvalidToolArguments, Case.run(std.testing.allocator, "{\"text\":}"));
 }
 
 test "ACP permission arguments are validated and reserialized before emission" {
