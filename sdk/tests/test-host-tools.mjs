@@ -14,6 +14,14 @@ const encoded = new TextEncoder();
 let modelRequests = 0;
 let toolCalls = 0;
 const sdkEvents = [];
+// Mirror the nested array and escaped newlines from the reported native crash.
+const toolInput = {
+  key: "alpha",
+  items: [
+    { text: "first\nline", done: true },
+    { text: "second", done: false },
+  ],
+};
 
 const server = createServer((request, response) => {
   let body = "";
@@ -32,8 +40,14 @@ const server = createServer((request, response) => {
       const lookup = payload.tools?.find((tool) => tool.name === "lookup");
       assert.ok(lookup, `host tool was not advertised to the model: ${JSON.stringify(payload.tools)}`);
       assert.equal(lookup.inputSchema.properties.key.type, "string");
+      assert.equal(lookup.inputSchema.properties.items.items.type, "object");
       response.end([
-        'data: {"type":"tool-call","toolCallId":"call_1","toolName":"lookup","input":{"key":"alpha"}}',
+        `data: ${JSON.stringify({
+          type: "tool-call",
+          toolCallId: "call_1",
+          toolName: "lookup",
+          input: JSON.stringify(toolInput, null, 2),
+        })}`,
         'data: {"type":"finish","finishReason":{"unified":"tool-calls","raw":"tool-calls"},"usage":{"inputTokens":{"total":1},"outputTokens":{"total":1}}}',
         "data: [DONE]",
         "",
@@ -69,12 +83,24 @@ try {
       description: "Look up a value by key.",
       inputSchema: {
         type: "object",
-        properties: { key: { type: "string" } },
+        properties: {
+          key: { type: "string" },
+          items: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: { text: { type: "string" }, done: { type: "boolean" } },
+              required: ["text", "done"],
+              additionalProperties: false,
+            },
+          },
+        },
         required: ["key"],
         additionalProperties: false,
       },
       async execute(input, { signal }) {
         assert.equal(signal.aborted, false);
+        assert.deepEqual(input, toolInput);
         toolCalls += 1;
         return `value:${input.key}`;
       },
