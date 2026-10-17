@@ -654,7 +654,13 @@ fn callHostTool(
     params.writer.writeAll(",\"toolCallId\":") catch return error.OutOfMemory;
     std.json.Stringify.value(call_id, .{}, &params.writer) catch return error.OutOfMemory;
     params.writer.writeAll(",\"input\":") catch return error.OutOfMemory;
-    params.writer.writeAll(arguments_json) catch return error.OutOfMemory;
+    // The host transport frames JSON-RPC messages on newlines. Validate and
+    // compact model-generated arguments before inserting them into the frame.
+    writeValidatedToolArguments(alloc, &params.writer, arguments_json) catch |err| switch (err) {
+        // The allocating writer reports buffer exhaustion as WriteFailed.
+        error.OutOfMemory, error.WriteFailed => return error.OutOfMemory,
+        else => return error.InvalidToolArguments,
+    };
     params.writer.writeByte('}') catch return error.OutOfMemory;
     state.writer.writeRequest(
         alloc,
@@ -2444,8 +2450,10 @@ fn requestAcpPermission(
 }
 
 fn writeValidatedToolArguments(alloc: Allocator, writer: *std.Io.Writer, arguments_json: []const u8) !void {
-    var parsed = std.json.parseFromSlice(std.json.Value, alloc, arguments_json, .{}) catch
-        return error.InvalidToolArgumentsJson;
+    var parsed = std.json.parseFromSlice(std.json.Value, alloc, arguments_json, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidToolArgumentsJson,
+    };
     defer parsed.deinit();
     try std.json.Stringify.value(parsed.value, .{}, writer);
 }
@@ -4401,6 +4409,45 @@ test "mapToolKind maps surviving tools" {
     try std.testing.expectEqual(acp_types.ToolCallKind.other, mapToolKind("install_skill"));
 }
 
+test "ACP host tool serialization preserves allocation failures" {
+    const Case = struct {
+        fn respond(raw: ?*anyopaque, frame: []const u8) !void {
+            const state: *server.ServerState = @ptrCast(@alignCast(raw.?));
+            const parsed = try std.json.parseFromSlice(std.json.Value, state.alloc, frame, .{});
+            defer parsed.deinit();
+            const object = parsed.value.object;
+            if (!std.mem.eql(u8, object.get("method").?.string, "libfx/tool_call")) return;
+            const id: u64 = @intCast(object.get("id").?.integer);
+            // A cancelled response ends the successful serialization probe
+            // without adding unrelated result-parsing allocations to the sweep.
+            state.pending_outbound.getPtr(id).?.response = .{ .cancelled = true };
+        }
+
+        fn run(alloc: Allocator, input: []const u8) !void {
+            var state = server.ServerState{
+                .alloc = std.testing.allocator,
+                .cfg = undefined,
+                .writer = jsonrpc.Writer.init(),
+            };
+            defer state.pending_outbound.deinit(state.alloc);
+            state.writer = jsonrpc.Writer.initCallback(&state, respond);
+
+            const result = callHostTool(&state, alloc, "inspect", "call_1", input, 1024, null) catch |err| {
+                try std.testing.expectEqual(@as(usize, 0), state.pending_outbound.count());
+                if (err == error.Cancelled) return;
+                return err;
+            };
+            result.deinit(alloc);
+            return error.ExpectedCancelledResponse;
+        }
+    };
+
+    const padding: [1024]u8 = @splat('x');
+    const input = "{\n \"text\":\"first\\nsecond\",\n \"padding\":\"" ++ padding ++ "\",\n \"items\":[1,true,null,{\"path\":\"README.md\"}]\n}";
+    try std.testing.checkAllAllocationFailures(testing_allocator.no_resize, Case.run, .{input});
+    try std.testing.expectError(error.InvalidToolArguments, Case.run(std.testing.allocator, "{\"text\":}"));
+}
+
 test "ACP permission arguments are validated and reserialized before emission" {
     const alloc = std.testing.allocator;
     var out: std.Io.Writer.Allocating = .init(alloc);
@@ -4409,6 +4456,20 @@ test "ACP permission arguments are validated and reserialized before emission" {
     try writeValidatedToolArguments(alloc, &out.writer, " { \"path\" : \"README.md\" } ");
     try std.testing.expectEqualStrings("{\"path\":\"README.md\"}", out.written());
 
+    // Raw newlines inside JSON whitespace must never split a JSON-RPC frame;
+    // newlines within a string value remain escaped in the serialized JSON.
+    var multiline: std.Io.Writer.Allocating = .init(alloc);
+    defer multiline.deinit();
+    try writeValidatedToolArguments(
+        alloc,
+        &multiline.writer,
+        "{\n  \"path\": \"README.md\",\n  \"line\": \"first\\nsecond\"\n}",
+    );
+    try std.testing.expectEqualStrings(
+        "{\"path\":\"README.md\",\"line\":\"first\\nsecond\"}",
+        multiline.written(),
+    );
+
     var malformed: std.Io.Writer.Allocating = .init(alloc);
     defer malformed.deinit();
     try std.testing.expectError(
@@ -4416,6 +4477,15 @@ test "ACP permission arguments are validated and reserialized before emission" {
         writeValidatedToolArguments(alloc, &malformed.writer, "{\"path\":}"),
     );
     try std.testing.expectEqual(@as(usize, 0), malformed.written().len);
+
+    var exhausted = std.testing.FailingAllocator.init(alloc, .{ .fail_index = 0 });
+    var oom_out: std.Io.Writer.Allocating = .init(alloc);
+    defer oom_out.deinit();
+    try std.testing.expectError(
+        error.OutOfMemory,
+        writeValidatedToolArguments(exhausted.allocator(), &oom_out.writer, "{\"path\":\"README.md\"}"),
+    );
+    try std.testing.expectEqual(@as(usize, 0), oom_out.written().len);
 }
 
 test "acp exposes web_search progress updates" {
