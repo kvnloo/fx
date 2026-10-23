@@ -1,0 +1,17 @@
+{
+  "name": "@fx/tern-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Optional Tern semantic terminal frontend over the fx ACP runtime",
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@stencil-hq/tern": "0.1.0"
+  },
+  "scripts": {
+    "start": "node cli.mjs",
+    "test": "node --test test/*.test.mjs"
+  }
+}
