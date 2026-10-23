@@ -35,6 +35,15 @@ The enforced builder removes the old binary and receipt, runs Zig, and writes a 
 
 The native Zig suite also executes the existing JS session-host fixture. Native fixture symbols use ordinary C linkage. WebAssembly builds retain the `fx` import module. A binding correction keeps that fixture executable without adding a native `libfx` dependency or replacing its assertions.
 
+When a local build host cannot admit the gate, the registered `CI` workflow has an opt-in `tern_certify` mode. Set `FEATURE_BRANCH` to the published feature branch and `BASE_COMMIT` to its exact untouched merge-base SHA, then dispatch:
+
+```sh
+gh workflow run ci.yml --repo kvnloo/fx --ref "$FEATURE_BRANCH" \
+  -f tern_certify=true -f tern_base_sha="$BASE_COMMIT"
+```
+
+This mode runs only four independent certification phases: base/root, head/root, head/real-runtime, and head/WASM. Both source checkouts retain full Git metadata (`fetch-depth: 0`), so ignore-sensitive fixtures keep their repository context. Each phase uses Zig 0.16.0, a 6 GiB / 2 CPU systemd scope, a 1800-second remote deadline, and `-j1`. The paired native root flags are `-Dtarget=x86_64-linux -Dcpu=baseline -Doptimize=ReleaseSafe -j1`. Evidence artifacts retain source SHA, output, actual resource counters, and the runtime binary/receipt for native Tern proof. A failed base gate does not cancel the other phases and is not a waiver. Ordinary CI is unchanged unless this explicit mode is selected.
+
 For actual native Tern evidence, create an owned idle Tern shell on an isolated Sway display and select a new session named `TRN1-FX-...`. Do not use an operator's existing window, session, or default control socket. Then run:
 
 ```sh

@@ -109,6 +109,8 @@ async function send(text) {
   await readyEditor();
   await command('click ".sf-editor"');
   await command(`type ${JSON.stringify(text)}`);
+  await waitFor(async () => composerWitnesses(await records()).text === text,
+    'The app did not render the exact pending prompt before native send');
   await command('key Enter');
 }
 let launched = false;
