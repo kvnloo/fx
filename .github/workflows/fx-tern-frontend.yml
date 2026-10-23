@@ -19,10 +19,8 @@ jobs:
       - name: Verify official SDK package installation
         run: npm ci --ignore-scripts --no-audit --no-fund
         working-directory: sdk/tern
-      - name: Build real FX runtime
-        run: zig build -Doptimize=ReleaseSafe
-      - name: Bind native binary to checkout head
-        run: node sdk/tern/build-receipt.mjs "$PWD/zig-out/bin/fx"
+      - name: Build and bind real FX runtime to exact source
+        run: node sdk/tern/build-receipt.mjs --build -- -Doptimize=ReleaseSafe
       - name: Node unit and real ACP integration tests
         run: FX_TERN_REAL_BINARY="$PWD/zig-out/bin/fx" node --test sdk/tern/test/*.test.mjs
       - name: Verify SDK exports

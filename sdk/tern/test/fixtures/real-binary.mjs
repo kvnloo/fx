@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { realpath } from 'node:fs/promises';
 import { isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { assertNativeBinary, expectedSourceHead, readVerifiedBuildReceipt } from '../../build-receipt.mjs';
+import { readVerifiedBuildReceipt } from '../../build-receipt.mjs';
 
 export async function requiredRealBinary() {
   const requested = process.env.FX_TERN_REAL_BINARY;
@@ -11,8 +11,6 @@ export async function requiredRealBinary() {
   const expected = fileURLToPath(new URL('../../../../zig-out/bin/fx', import.meta.url));
   const binary = await realpath(requested);
   assert.equal(binary, await realpath(expected), 'Use the exact built Zig binary from this checkout');
-  await assertNativeBinary(binary);
-  const sourceHead = await expectedSourceHead();
-  const receipt = await readVerifiedBuildReceipt(binary, sourceHead);
+  const receipt = await readVerifiedBuildReceipt(binary);
   return { binary, ...receipt };
 }

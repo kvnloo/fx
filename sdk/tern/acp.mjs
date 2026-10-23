@@ -61,7 +61,7 @@ export class FxAcp extends EventEmitter {
     this.pending.clear();
     this.permissions.clear();
     if (!expectedClose) this.emit('failed', err);
-    queueMicrotask(() => { void this.close(); });
+    queueMicrotask(() => { void this.close().catch(() => {}); });
   }
 
   #read(chunk) {
@@ -191,17 +191,31 @@ export class FxAcp extends EventEmitter {
     if (!child) return null;
     if (this.outcome) return this.outcome;
     // Wait for close, not exit: stderr may still have unread diagnostic bytes.
+    // An exited child can leave inherited pipes open, so every phase is bounded.
     let timer;
-    const escalate = signal => {
-      if (child.exitCode === null && child.signalCode == null) child.kill(signal);
-      if (signal === 'SIGTERM') timer = setTimeout(() => escalate('SIGKILL'), this.shutdownTimeout);
-    };
-    timer = setTimeout(() => escalate('SIGTERM'), this.shutdownTimeout);
+    const deadline = new Promise((_, reject) => {
+      const expire = () => reject(new Error(
+        `fx acp cleanup incomplete: close was not observed after the shutdown deadline${this.stderr ? ': ' + this.stderr : ''}`,
+        this.failure ? { cause: this.failure } : undefined,
+      ));
+      const escalate = signal => {
+        if (child.exitCode === null && child.signalCode == null) {
+          try { child.kill(signal); } catch (error) { this.#failed(error); }
+        }
+        timer = setTimeout(signal === 'SIGTERM' ? () => escalate('SIGKILL') : expire, this.shutdownTimeout);
+      };
+      timer = setTimeout(() => escalate('SIGTERM'), this.shutdownTimeout);
+    });
     try {
       try {
         if (!child.stdin.destroyed && !child.stdin.writableEnded) child.stdin.end();
       } catch (error) { this.#failed(error); }
-      return await this.exited;
+      return await Promise.race([this.exited, deadline]);
+    } catch (error) {
+      this.#failed(error);
+      // These three pipe endpoints belong to this transport, not descendants.
+      for (const stream of [child.stdin, child.stdout, child.stderr]) stream.destroy();
+      throw error;
     } finally { clearTimeout(timer); }
   }
 }

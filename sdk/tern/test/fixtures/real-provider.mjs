@@ -113,7 +113,7 @@ export async function startRealProvider({ withCancel = false, singleLine = false
       const step = plan[requests.length - 1];
       assert.ok(step, 'Unexpected extra HTTP request, retry, or duplicated prompt');
       const lastUser = body.messages.filter(message => message.role === 'user').at(-1);
-      assert.ok(messageText(lastUser).includes(step.prompt), 'HTTP request must preserve the complete expected prompt');
+      assert.equal(messageText(lastUser), step.prompt, 'HTTP request must preserve the exact user message without extra draft text');
       assert.equal(userPromptCount(body, prompts.unicode), 1, 'Unicode multiline prompt must occur once per conversation context');
       for (const prompt of Object.values(prompts)) {
         assert.ok(userPromptCount(body, prompt) <= 1, 'A user prompt must not be duplicated');

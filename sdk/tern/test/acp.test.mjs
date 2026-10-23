@@ -49,7 +49,7 @@ test('ACP process exit rejects requests and does not leak permission state', asy
   await acp.close();
 });
 
-function memoryAcp(handle = () => {}, { eof = true, terminate = true } = {}) {
+function memoryAcp(handle = () => {}, { eof = true, terminate = true, kill = true, closeOnExit = true } = {}) {
   const child = new EventEmitter();
   Object.assign(child, { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), exitCode: null, signalCode: null });
   const sent = [];
@@ -67,15 +67,20 @@ function memoryAcp(handle = () => {}, { eof = true, terminate = true } = {}) {
     child.exitCode = code;
     child.signalCode = signal;
     child.emit('exit', code, signal);
-    child.emit('close', code, signal);
   };
-  child.stdin.on('finish', () => { if (eof && child.exitCode === null && child.signalCode === null) exit(0); });
+  const close = () => child.emit('close', child.exitCode, child.signalCode);
+  const finish = (code, signal = null) => {
+    exit(code, signal);
+    if (closeOnExit) close();
+  };
+  child.stdin.on('finish', () => { if (eof && child.exitCode === null && child.signalCode === null) finish(0); });
   child.kill = signal => {
     signals.push(signal);
-    if (terminate || signal === 'SIGKILL') queueMicrotask(() => exit(null, signal));
-    return true;
+    const accepted = terminate || (signal === 'SIGKILL' && kill);
+    if (accepted) queueMicrotask(() => finish(null, signal));
+    return accepted;
   };
-  return { acp: new FxAcp({ spawnProcess: () => child }), child, sent, reply, exit, signals };
+  return { acp: new FxAcp({ spawnProcess: () => child }), child, sent, reply, exit, close, signals };
 }
 
 test('initialization rejects incompatible ACP versions before creating a session', async () => {
@@ -165,13 +170,14 @@ test('clean EOF shutdown preserves the outcome without signals or runtime failur
 });
 
 test('nonzero EOF shutdown captures trailing stderr without spurious runtime failure', async () => {
-  const { acp, child, exit } = memoryAcp(() => {}, { eof: false });
+  const { acp, child, exit, close } = memoryAcp(() => {}, { eof: false });
   const failures = [];
   acp.on('failed', error => failures.push(error));
   await acp.start();
   child.stdin.on('finish', () => {
-    child.stderr.write('native shutdown failed');
     exit(23);
+    child.stderr.write('native shutdown failed');
+    close();
   });
   assert.deepEqual(await acp.close(), { code: 23, signal: null, stderr: 'native shutdown failed' });
   assert.deepEqual(failures, []);
@@ -196,15 +202,18 @@ test('shutdown waits for EOF deadline then escalates TERM to KILL only after its
 });
 
 test('exit before close retains the actual outcome and rejects requests once', async () => {
-  const { acp, child, exit, signals } = memoryAcp();
+  const { acp, child, exit, close, signals } = memoryAcp();
   const failures = [];
   acp.on('failed', error => failures.push(error));
   await acp.start();
   const rejected = assert.rejects(acp.prompt('waiting'), /fx acp exited \(7\)/);
   child.stderr.write('fatal');
   exit(7);
+  assert.equal(acp.outcome, null);
+  child.stderr.write(' after exit');
+  close();
   await rejected;
-  assert.deepEqual(await acp.close(), { code: 7, signal: null, stderr: 'fatal' });
+  assert.deepEqual(await acp.close(), { code: 7, signal: null, stderr: 'fatal after exit' });
   assert.equal(failures.length, 1);
   assert.deepEqual(signals, []);
 });
@@ -228,4 +237,169 @@ test('EOF deadline permits SIGTERM fallback and preserves its actual signal', as
   assert.deepEqual(await closing, { code: null, signal: 'SIGTERM', stderr: '' });
   t.mock.timers.tick(1000);
   assert.deepEqual(signals, ['SIGTERM']);
+});
+
+test('an exited child with inherited pipes rejects at the final deadline and releases only owned streams', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { acp, child, close, signals } = memoryAcp(() => {}, { closeOnExit: false });
+  const unrelated = new PassThrough();
+  child.stdio = [child.stdin, child.stdout, child.stderr, unrelated];
+  const failures = [];
+  acp.on('failed', error => failures.push(error));
+  await acp.start();
+  const exit = new Promise(resolve => child.once('exit', resolve));
+  const closing = acp.close();
+  let cleanupFailure;
+  const rejected = assert.rejects(closing, error => {
+    cleanupFailure = error;
+    return /cleanup incomplete.*close was not observed/.test(error.message);
+  });
+  try {
+    await exit;
+    assert.equal(child.exitCode, 0);
+    assert.equal(acp.outcome, null);
+    child.stderr.write('inherited descriptors still open');
+    t.mock.timers.tick(1000);
+    t.mock.timers.tick(1000);
+    t.mock.timers.tick(999);
+    assert.equal(child.stdout.destroyed, false);
+    assert.equal(child.stderr.destroyed, false);
+    assert.equal(acp.failure, null);
+    assert.deepEqual(signals, []);
+    t.mock.timers.tick(1);
+    await rejected;
+    assert.equal(acp.failure, cleanupFailure);
+    assert.match(cleanupFailure.message, /inherited descriptors still open/);
+    assert.equal(acp.outcome, null);
+    assert.equal(child.stdin.destroyed, true);
+    assert.equal(child.stdout.destroyed, true);
+    assert.equal(child.stderr.destroyed, true);
+    assert.equal(unrelated.destroyed, false);
+    assert.deepEqual(failures, []);
+    assert.equal(acp.close(), closing);
+    close();
+    await assert.rejects(acp.close(), error => error === cleanupFailure);
+  } finally { unrelated.destroy(); }
+});
+
+test('a killed child whose inherited pipes never close still fails within the final settlement bound', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { acp, child, signals } = memoryAcp(() => {}, { eof: false, terminate: false, closeOnExit: false });
+  await acp.start();
+  const closing = acp.close();
+  const rejected = assert.rejects(closing, /cleanup incomplete/);
+  const exit = new Promise(resolve => child.once('exit', resolve));
+  t.mock.timers.tick(1000);
+  assert.deepEqual(signals, ['SIGTERM']);
+  t.mock.timers.tick(1000);
+  await exit;
+  assert.equal(child.signalCode, 'SIGKILL');
+  assert.equal(acp.outcome, null);
+  t.mock.timers.tick(999);
+  assert.equal(child.stdout.destroyed, false);
+  t.mock.timers.tick(1);
+  await rejected;
+  assert.deepEqual(signals, ['SIGTERM', 'SIGKILL']);
+  assert.equal(child.stdout.destroyed, true);
+  assert.equal(child.stderr.destroyed, true);
+  assert.equal(acp.outcome, null);
+});
+
+test('an unkillable direct child rejects shared close instead of inventing a successful outcome', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { acp, child, signals } = memoryAcp(() => {}, { eof: false, terminate: false, kill: false });
+  await acp.start();
+  const pending = assert.rejects(acp.prompt('waiting'), /session closed/);
+  const closing = acp.close();
+  const rejected = assert.rejects(closing, /cleanup incomplete/);
+  t.mock.timers.tick(1000);
+  t.mock.timers.tick(1000);
+  t.mock.timers.tick(1000);
+  await rejected;
+  await pending;
+  assert.deepEqual(signals, ['SIGTERM', 'SIGKILL']);
+  assert.equal(child.exitCode, null);
+  assert.equal(child.signalCode, null);
+  assert.equal(acp.outcome, null);
+  assert.match(acp.failure.message, /cleanup incomplete/);
+  assert.equal(acp.pending.size, 0);
+  assert.equal(child.stdin.destroyed, true);
+  assert.equal(child.stdout.destroyed, true);
+  assert.equal(child.stderr.destroyed, true);
+  assert.equal(acp.close(), closing);
+});
+
+test('a delayed close before the final deadline drains stderr and cancels every remaining timer', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { acp, child, exit, close, signals } = memoryAcp(() => {}, { eof: false });
+  await acp.start();
+  const closing = acp.close();
+  exit(0);
+  t.mock.timers.tick(1000);
+  t.mock.timers.tick(1000);
+  t.mock.timers.tick(999);
+  assert.equal(acp.failure, null);
+  assert.equal(acp.outcome, null);
+  assert.equal(child.stdout.destroyed, false);
+  assert.equal(child.stderr.destroyed, false);
+  child.stderr.write('last diagnostic after exit');
+  close();
+  assert.deepEqual(await closing, { code: 0, signal: null, stderr: 'last diagnostic after exit' });
+  t.mock.timers.tick(10_000);
+  assert.equal(acp.failure, null);
+  assert.equal(child.stdout.destroyed, false);
+  assert.equal(child.stderr.destroyed, false);
+  assert.deepEqual(signals, []);
+});
+
+test('signal errors remain transport failures and cannot prevent bounded cleanup rejection', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { acp, child, signals } = memoryAcp(() => {}, { eof: false });
+  const signalFailure = new Error('direct child signal denied');
+  child.kill = signal => { signals.push(signal); throw signalFailure; };
+  await acp.start();
+  const closing = acp.close();
+  const rejected = assert.rejects(closing, error => {
+    assert.match(error.message, /cleanup incomplete/);
+    assert.equal(error.cause, signalFailure);
+    return true;
+  });
+  t.mock.timers.tick(1000);
+  assert.equal(acp.failure, signalFailure);
+  t.mock.timers.tick(1000);
+  t.mock.timers.tick(1000);
+  await rejected;
+  assert.deepEqual(signals, ['SIGTERM', 'SIGKILL']);
+  assert.equal(acp.failure, signalFailure);
+  assert.equal(acp.outcome, null);
+  assert.equal(child.stdin.destroyed, true);
+  assert.equal(child.stdout.destroyed, true);
+  assert.equal(child.stderr.destroyed, true);
+});
+
+test('automatic failure cleanup retains the original failure while its close promise rejects', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { acp, child } = memoryAcp(() => {}, { eof: false, terminate: false, kill: false });
+  const failures = [];
+  acp.on('failed', error => failures.push(error));
+  await acp.start();
+  const transportFailure = new Error('broken transport before cleanup');
+  const request = assert.rejects(acp.prompt('waiting'), error => error === transportFailure);
+  child.stdin.emit('error', transportFailure);
+  await request;
+  assert.ok(acp.closing);
+  const closing = acp.close();
+  const rejected = assert.rejects(closing, error => {
+    assert.match(error.message, /cleanup incomplete/);
+    assert.equal(error.cause, transportFailure);
+    return true;
+  });
+  t.mock.timers.tick(1000);
+  t.mock.timers.tick(1000);
+  t.mock.timers.tick(1000);
+  await rejected;
+  assert.equal(acp.failure, transportFailure);
+  assert.deepEqual(failures, [transportFailure]);
+  assert.equal(acp.close(), closing);
+  assert.equal(acp.outcome, null);
 });

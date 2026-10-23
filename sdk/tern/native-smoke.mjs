@@ -10,12 +10,15 @@ import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { startRealProvider } from './test/fixtures/real-provider.mjs';
 import { requiredRealBinary } from './test/fixtures/real-binary.mjs';
-import { assertExactFirstSend, composerWitnesses } from './test/fixtures/native-wire.mjs';
+import { assertExactSends, assertNoRuntimeError, composerWitnesses, validateNativeWire } from './test/fixtures/native-wire.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const endpoint = process.env.TERN_NATIVE_CONTROL;
 const receipt = process.env.TERN_NATIVE_RECEIPT;
-const { binary, sha256, sourceHead } = await requiredRealBinary();
+const identity = await requiredRealBinary();
+const { binary, sha256, sourceHead, sourceIdentity } = identity;
+const sessionName = process.env.TERN_NATIVE_SESSION;
+assert.match(sessionName ?? '', /^TRN1-FX-[A-Za-z0-9-]+$/, 'TERN_NATIVE_SESSION must name the explicitly owned FX test session');
 assert.ok(endpoint?.startsWith('/'), 'TERN_NATIVE_CONTROL must name the owned Unix control socket');
 assert.ok(receipt?.startsWith('/'), 'TERN_NATIVE_RECEIPT must name an absolute evidence directory');
 assert.ok(binary?.startsWith('/'), 'FX_TERN_REAL_BINARY must name the exact-head built binary');
@@ -28,7 +31,7 @@ const log = [];
 const delay = ms => new Promise(resolveDelay => setTimeout(resolveDelay, ms));
 const quote = value => `'${String(value).replaceAll("'", "'\\''")}'`;
 async function command(text) {
-  const reply = await new Promise((resolveReply, reject) => {
+  let reply = await new Promise((resolveReply, reject) => {
     const socket = connect(endpoint);
     let result = '';
     let settled = false;
@@ -48,6 +51,12 @@ async function command(text) {
       }
     });
   });
+  if (text === 'state' && reply.ok) {
+    const current = reply.sessions?.find(session => session.current);
+    assert.equal(current?.name, sessionName, 'The controlled window must select only the explicitly owned FX session');
+    reply = { ok: true, session: current, focused: reply.focused, panes: reply.panes,
+      viewport: reply.viewport, focused_element: reply.focused_element, gate: reply.gate };
+  }
   log.push({ command: text, reply });
   assert.equal(reply.ok, true, `${text}: ${JSON.stringify(reply)}`);
   return reply;
@@ -69,8 +78,28 @@ async function snapshot(name) {
     await promisify(execFile)(process.env.TERN_NATIVE_DISPLAY_WRAPPER, ['screenshot', join(receipt, `${name}.png`)]);
   } else await command(`shot fx-${name}`);
 }
+async function records() {
+  try {
+    const text = await readFile(join(receipt, 'wire.jsonl'), 'utf8');
+    return text.trim() ? text.trim().split('\n').map(line => JSON.parse(line)) : [];
+  } catch (error) { if (error.code === 'ENOENT') return []; throw error; }
+}
+const normalize = text => text.replace(/\s+/gu, ' ').trim();
+function visibleText(value) {
+  if (Array.isArray(value)) return value.map(visibleText).join(' ');
+  if (!value || typeof value !== 'object') return '';
+  const own = ['text', 'name', 'value'].map(key => typeof value[key] === 'string' ? value[key] : '').join(' ');
+  return own + ' ' + Object.values(value).filter(item => item && typeof item === 'object').map(visibleText).join(' ');
+}
+async function visibleReply(expected) {
+  await waitFor(async () => {
+    assertNoRuntimeError(await records());
+    return normalize(visibleText(await command('tree .sf-main'))).includes(normalize(expected));
+  }, 'The expected successful assistant content is not visible in actual Tern');
+}
 async function readyEditor() {
   await waitFor(async () => {
+    assertNoRuntimeError(await records());
     const editor = await command('tree .sf-editor');
     const status = await command('tree .sf-status');
     return JSON.stringify(editor).includes('sf-editor') && JSON.stringify(status).includes('Ready');
@@ -83,17 +112,18 @@ async function send(text) {
   await command('key Enter');
 }
 let launched = false;
+let candidate;
+let failure;
 try {
   const state = await command('state');
   assert.equal(state.focused?.prompt, true, 'Launch only into a confirmed owned idle shell');
   assert.ok(!state.focused?.running, 'Foreground must be the owned shell, not another app');
   const env = { ...fixture.env, TERN_TSP_RECORD: join(receipt, 'wire.jsonl') };
   const launcher = join(receipt, 'app.mjs');
-  await writeFile(launcher, `import {writeFileSync} from 'node:fs';\nwriteFileSync(${JSON.stringify(join(receipt, 'app.pid'))}, String(process.pid));\nprocess.on('exit', code => writeFileSync(${JSON.stringify(join(receipt, 'app-exit.json'))}, JSON.stringify({code, raw:process.stdin.isRaw})));\nconst {FxAcp}=await import(${JSON.stringify(pathToFileURL(join(root, 'sdk/tern/acp.mjs')).href)});\nconst close=FxAcp.prototype.close;\nFxAcp.prototype.close=function(...args){return close.apply(this,args).then(outcome=>{writeFileSync(${JSON.stringify(join(receipt, 'app-fx-exit.json'))},JSON.stringify(outcome));return outcome;});};\nawait import(${JSON.stringify(pathToFileURL(join(root, 'sdk/tern/cli.mjs')).href)});\n`);
+  await writeFile(launcher, `import {writeFileSync,appendFileSync} from 'node:fs';\nconst wire=${JSON.stringify(join(receipt, 'wire.jsonl'))};\nconst {decodeRawMessages}=await import(${JSON.stringify(pathToFileURL(join(root, 'sdk/tern/test/fixtures/native-wire.mjs')).href)});\nwriteFileSync(${JSON.stringify(join(receipt, 'app.pid'))},String(process.pid));\nwriteFileSync(${JSON.stringify(join(receipt, 'app-stderr.log'))},'');\nconst stdout=process.stdout.write.bind(process.stdout);\nprocess.stdout.write=function(...args){const bytes=typeof args[0]==='string'?Buffer.from(args[0],typeof args[1]==='string'?args[1]:'utf8'):Buffer.from(args[0]);appendFileSync(${JSON.stringify(join(receipt, 'pty-output.log'))},bytes);if(bytes.includes(Buffer.from('\\x1b_tsp;x;')))for(const message of decodeRawMessages(bytes))if(message.verb==='x')appendFileSync(wire,JSON.stringify({t:Date.now(),dir:'out',...message,observer:'actual-stdout-close'})+'\\n');return stdout(...args);};\nconst stderr=process.stderr.write.bind(process.stderr);\nprocess.stderr.write=function(...args){appendFileSync(${JSON.stringify(join(receipt, 'app-stderr.log'))},typeof args[0]==='string'?Buffer.from(args[0],typeof args[1]==='string'?args[1]:'utf8'):Buffer.from(args[0]));return stderr(...args);};\nprocess.on('exit',code=>writeFileSync(${JSON.stringify(join(receipt, 'app-exit.json'))},JSON.stringify({code,raw:process.stdin.isRaw})));\nconst {FxAcp}=await import(${JSON.stringify(pathToFileURL(join(root, 'sdk/tern/acp.mjs')).href)});\nconst close=FxAcp.prototype.close;\nFxAcp.prototype.close=function(...args){return close.apply(this,args).then(outcome=>{writeFileSync(${JSON.stringify(join(receipt, 'app-fx-exit.json'))},JSON.stringify(outcome));return outcome;});};\nawait import(${JSON.stringify(pathToFileURL(join(root, 'sdk/tern/cli.mjs')).href)});\n`);
   const launch = `cd ${quote(fixture.workspace)} && env -i ${Object.entries(env).map(([key, value]) => quote(`${key}=${value}`)).join(' ')} ${quote(process.execPath)} ${quote(launcher)} --fx ${quote(binary)}`;
   await writeFile(join(receipt, 'launch.sh'), launch + '\n', { mode: 0o700 });
-  const relay = `script --quiet --return --flush --command ${quote(`sh ${quote(join(receipt, 'launch.sh'))}`)} ${quote(join(receipt, 'pty-output.log'))}`;
-  await command(`run ${JSON.stringify(relay)}`);
+  await command(`run ${JSON.stringify(`sh ${quote(join(receipt, 'launch.sh'))}`)}`);
   launched = true;
   await readyEditor();
   await command('click ".sf-editor"');
@@ -102,13 +132,13 @@ try {
   await command(`a11y set-text-selection ".sf-editor" 0 ${original.length}`);
   await command(`type ${JSON.stringify(fixture.prompts.unicode)}`);
   await waitFor(async () => {
-    const records = (await readFile(join(receipt, 'wire.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
-    return composerWitnesses(records).text === fixture.prompts.unicode;
+    return composerWitnesses(await records()).text === fixture.prompts.unicode;
   }, 'Rendered composer does not equal the exact Unicode replacement');
   await snapshot('unicode-edited');
   await command('key Enter');
   await waitFor(() => fixture.requests.length === 1, 'Unicode prompt did not reach real FX');
   await readyEditor();
+  await visibleReply(fixture.expected.unicodeReply);
   await command('size 1024 720');
   await command('split right');
   await command('focus left');
@@ -121,6 +151,7 @@ try {
   await command('click ".sf-dock button:nth-of-type(1)"');
   await waitFor(() => fixture.requests.length === 3, 'Allow decision did not complete');
   await readyEditor();
+  await visibleReply(fixture.expected.allowReply);
   assert.equal(await readFile(fixture.targets.allowed, 'utf8'), fixture.expected.allowed);
   await send(fixture.prompts.reject);
   await waitFor(async () => JSON.stringify(await command('tree .sf-dock button')).includes('Reject'), 'Actual reject option did not appear');
@@ -128,10 +159,12 @@ try {
   await command('click ".sf-dock button:nth-of-type(3)"');
   await waitFor(() => fixture.requests.length === 5, 'Reject decision did not complete');
   await readyEditor();
+  await visibleReply(fixture.expected.rejectReply);
   assert.equal(await readFile(fixture.targets.rejected, 'utf8'), fixture.expected.seed);
   if (fixture.prompts.cancel) {
     await send(fixture.prompts.cancel);
     await waitFor(() => fixture.cancellation.started, 'Cancellation turn did not start');
+    await visibleReply(fixture.expected.cancelReply);
     await command('key Escape');
     await readyEditor();
     await waitFor(() => fixture.cancellation.disconnected, 'Real provider stream was not cancelled');
@@ -174,11 +207,12 @@ try {
   assert.equal(shell.focused.last?.status ?? shell.focused.last_status ?? 0, 0);
   const appExit = JSON.parse(await readFile(join(receipt, 'app-exit.json'), 'utf8'));
   assert.equal(appExit.code, 0);
-  assert.equal(appExit.raw, false, 'Actual Node app must restore raw mode before the relay restores its parent tty');
+  assert.equal(appExit.raw, false, 'Actual Node app must restore the same Tern PTY before its following shell');
   const fxExit = JSON.parse(await readFile(join(receipt, 'app-fx-exit.json'), 'utf8'));
   assert.equal(fxExit.code, 0, 'The actual FX subprocess must exit normally');
   assert.equal(fxExit.signal, null);
   assert.equal(fxExit.stderr, '', 'FX stderr must be clean');
+  assert.equal(await readFile(join(receipt, 'app-stderr.log'), 'utf8'), '', 'The native app stderr must be clean');
   const sentinel = join(receipt, 'following-shell-sentinel.txt');
   const tty = join(receipt, 'following-shell-tty.txt');
   const sentinelValue = `FX_TERN_FOLLOWING_SHELL_OK:${runId}`;
@@ -194,40 +228,47 @@ try {
   assert.match(ttyState, /\bicanon\b/);
   assert.doesNotMatch(ttyState, /-icanon|-echo\b/);
   await fixture.assertComplete({ resumed: false });
-  const records = (await readFile(join(receipt, 'wire.jsonl'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
-  const hello = records.find(record => record.dir === 'in' && record.verb === 'r' && record.body.r === 'hello');
-  assert.equal(hello?.body.term, 'tern', 'The peer must be actual Tern');
-  assert.equal(hello.body.ver, '0.9.5');
-  const lastSent = new Map();
-  const lastAck = new Map();
-  for (const record of records) {
-    if (record.dir === 'out' && record.verb === 'f') {
-      lastSent.set(record.body.sf, record.body.s);
-      assert.ok(record.body.s - (lastAck.get(record.body.sf) ?? 0) <= hello.body.credits, 'Frames must respect negotiated credits');
-    }
-    if (record.dir === 'in' && record.body.ev === 'ack') {
-      assert.ok(record.body.s <= (lastSent.get(record.body.sf) ?? 0), 'ACK must refer to a sent frame');
-      lastAck.set(record.body.sf, Math.max(lastAck.get(record.body.sf) ?? 0, record.body.s));
-    }
-  }
-  assert.ok(records.some(record => record.dir === 'in' && record.body.ev === 'edit'));
-  assertExactFirstSend(records, fixture.prompts.unicode);
-  const rawOutput = await readFile(join(receipt, 'pty-output.log'), 'utf8');
-  assert.ok(rawOutput.includes('\x1b_tsp;x;'), 'Actual PTY output must include the close packet omitted by SDK recording');
-  await writeFile(join(receipt, 'result.json'), JSON.stringify({ passed: true, runId, sourceHead, binary, sha256, fxExit, requests: fixture.requests.length, reattached: process.env.TERN_NATIVE_REATTACH === '1', syntheticProvider: true }, null, 2));
-  console.log('NATIVE_FX_PASS');
+  const completeWire = await records();
+  const intendedPrompts = [fixture.prompts.unicode, fixture.prompts.allow, fixture.prompts.reject, fixture.prompts.cancel];
+  assert.ok(completeWire.some(record => record.dir === 'in' && record.body.ev === 'edit'));
+  assertExactSends(completeWire, intendedPrompts);
+  const ledger = validateNativeWire(completeWire, await readFile(join(receipt, 'pty-output.log')));
+  candidate = { passed: true, runId, sourceHead, sourceIdentity, binary, sha256, fxExit, ledger,
+    requests: fixture.requests.length, reattached: process.env.TERN_NATIVE_REATTACH === '1', syntheticProvider: true };
 } catch (error) {
-  await writeFile(join(receipt, 'result.json'), JSON.stringify({ passed: false, error: error.message, launched, providerFailures: fixture.failures }, null, 2));
-  throw error;
+  failure = error;
 } finally {
-  await writeFile(join(receipt, 'commands.json'), JSON.stringify(log, null, 2));
-  await writeFile(join(receipt, 'http.json'), JSON.stringify(fixture.requests, null, 2));
   try {
-    const pid = Number(await readFile(join(receipt, 'app.pid'), 'utf8'));
-    const cmdline = await readFile(`/proc/${pid}/cmdline`, 'utf8');
-    if (Number.isSafeInteger(pid) && cmdline.includes(join(receipt, 'app.mjs'))) process.kill(pid, 'SIGTERM');
-  } catch (error) {
-    if (!['ENOENT', 'ESRCH'].includes(error.code)) throw error;
-  }
-  await fixture.close();
+    try {
+      const pid = Number(await readFile(join(receipt, 'app.pid'), 'utf8'));
+      const cmdline = await readFile(`/proc/${pid}/cmdline`, 'utf8');
+      if (Number.isSafeInteger(pid) && cmdline.includes(join(receipt, 'app.mjs'))) {
+        if (candidate) failure ??= new Error('The native process remained alive after its claimed exit');
+        process.kill(pid, 'SIGTERM');
+        const stillOwned = async () => {
+          try { return (await readFile(`/proc/${pid}/cmdline`, 'utf8')).includes(join(receipt, 'app.mjs')); }
+          catch (error) { if (error.code === 'ENOENT') return false; throw error; }
+        };
+        for (const [signal, timeout] of [['SIGTERM', 5000], ['SIGKILL', 1000]]) {
+          if (signal === 'SIGKILL' && await stillOwned()) process.kill(pid, signal);
+          const deadline = Date.now() + timeout;
+          while (Date.now() < deadline && await stillOwned()) await delay(50);
+          if (!await stillOwned()) break;
+        }
+        assert.equal(await stillOwned(), false, `Owned native process ${pid} did not finish cleanup`);
+      }
+    } catch (error) { if (!['ENOENT', 'ESRCH'].includes(error.code)) throw error; }
+  } catch (error) { failure ??= error; }
+  try { await fixture.close(); } catch (error) { failure ??= error; }
+  try {
+    await writeFile(join(receipt, 'commands.json'), JSON.stringify(log, null, 2));
+    await writeFile(join(receipt, 'http.json'), JSON.stringify(fixture.requests, null, 2));
+  } catch (error) { failure ??= error; }
 }
+if (failure) {
+  await writeFile(join(receipt, 'result.json'), JSON.stringify({ passed: false, runId, sourceHead,
+    error: failure.message, launched, providerFailures: fixture.failures }, null, 2));
+  throw failure;
+}
+await writeFile(join(receipt, 'result.json'), JSON.stringify(candidate, null, 2));
+console.log('NATIVE_FX_PASS');
