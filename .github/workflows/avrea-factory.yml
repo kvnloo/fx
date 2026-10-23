@@ -1,0 +1,56 @@
+name: Avrea factory verification
+'on':
+  workflow_dispatch:
+    inputs:
+      provider:
+        description: Use Avrea or an identical-scope GitHub-hosted control
+        type: choice
+        options:
+        - avrea
+        - github
+        default: avrea
+        required: true
+permissions:
+  contents: read
+jobs:
+  root-zig:
+    name: Complete root Zig ReleaseSafe gate
+    runs-on: ${{ inputs.provider == 'avrea' && 'avrea-ubuntu-latest-4-vcpu' || 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - optimize: ReleaseSafe
+          test_timeout_seconds: 1500
+      max-parallel: 1
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ github.sha }}
+        persist-credentials: false
+    - name: Setup Zig
+      uses: mlugg/setup-zig@v2
+      with:
+        version: 0.16.2
+        cache-key: ci-unit-${{ matrix.optimize }}
+    - name: Check formatting
+      run: zig fmt --check src/
+    - name: Validate PGSO corpus classification
+      run: python3 -m scripts.pgso.corpus --manifest scripts/pgso/corpus.json --list
+    - name: Audit public surface
+      run: ./scripts/check-public-surface.sh
+    - name: Check compactor boundary
+      run: ./scripts/check-compactor-boundary.sh
+    - name: Build
+      run: zig build -Doptimize=${{ matrix.optimize }}
+    - name: Test
+      env:
+        TEST_TIMEOUT_SECONDS: ${{ matrix.test_timeout_seconds }}
+      run: 'started_at=$SECONDS
+
+        trap ''printf "Unit tests elapsed: %ss\n" "$((SECONDS - started_at))"'' EXIT
+
+        timeout "${TEST_TIMEOUT_SECONDS}s" zig build test -Doptimize=${{ matrix.optimize }}
+
+        '
+    timeout-minutes: 60

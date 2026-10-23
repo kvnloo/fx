@@ -1,6 +1,7 @@
 name: Examples
 
 on:
+  workflow_dispatch:
   pull_request:
     paths:
       - 'examples/**'
@@ -16,8 +17,9 @@ permissions:
 
 jobs:
   examples:
-    runs-on: ubuntu-24.04
+    runs-on: avrea-ubuntu-latest-2-vcpu
     strategy:
+      max-parallel: 3
       matrix:
         example: [node-chat, browser-agent, nextjs-agent, nuxt-agent]
     defaults:

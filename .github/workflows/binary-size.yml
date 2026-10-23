@@ -21,12 +21,12 @@ jobs:
         include:
           - name: linux-x86_64
             target: x86_64-linux
-            runner: ubuntu-24.04
+            runner: avrea-ubuntu-latest-4-vcpu
             section_format: elf
             expected_file: "ELF 64-bit LSB.*x86-64"
           - name: linux-aarch64
             target: aarch64-linux
-            runner: ubuntu-24.04-arm
+            runner: avrea-ubuntu-latest-arm-4-vcpu
             section_format: elf
             expected_file: "ELF 64-bit LSB.*ARM aarch64"
           - name: macos-x86_64

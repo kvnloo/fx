@@ -1,0 +1,5 @@
+self-hosted-runner:
+  labels:
+  - avrea-ubuntu-latest-2-vcpu
+  - avrea-ubuntu-latest-4-vcpu
+  - avrea-ubuntu-latest-arm-4-vcpu

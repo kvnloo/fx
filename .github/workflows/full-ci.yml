@@ -24,9 +24,9 @@ jobs:
       matrix:
         platform:
           - name: linux-x86_64
-            runner: ubuntu-24.04
+            runner: avrea-ubuntu-latest-4-vcpu
           - name: linux-aarch64
-            runner: ubuntu-24.04-arm
+            runner: avrea-ubuntu-latest-arm-4-vcpu
           - name: macos-x86_64
             runner: macos-15-intel
           - name: macos-aarch64
@@ -88,10 +88,10 @@ jobs:
       matrix:
         platform:
           - name: linux-x86_64
-            runner: ubuntu-24.04
+            runner: avrea-ubuntu-latest-4-vcpu
             zig_tarball: zig-x86_64-linux
           - name: linux-aarch64
-            runner: ubuntu-24.04-arm
+            runner: avrea-ubuntu-latest-arm-4-vcpu
             zig_tarball: zig-aarch64-linux
           - name: macos-x86_64
             runner: macos-15-intel
@@ -236,7 +236,7 @@ jobs:
     needs:
       - native
       - e2e
-    runs-on: ubuntu-24.04
+    runs-on: avrea-ubuntu-latest-4-vcpu
     timeout-minutes: 5
     strategy:
       fail-fast: false

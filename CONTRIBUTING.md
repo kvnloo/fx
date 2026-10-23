@@ -647,3 +647,15 @@ Minimum checklist:
 3. Push the feature branch and open a draft PR immediately.
 4. Require all four **Full CI** jobs and the final ship gate to pass for the exact current commit before marking the PR ready.
 5. Update `README.md` if user-facing behavior changed.
+
+## Downstream Avrea verification
+
+On `ci/avrea-factory-20261023`, heavy Linux CI jobs use 4-vCPU Avrea runners;
+required ARM matrices retain ARM runners and macOS coverage is unchanged.
+`avrea-factory.yml` runs the complete root ReleaseSafe gate: formatting,
+corpus classification, public-surface and compactor-boundary audits, build,
+and unfiltered `zig build test`. The benchmark pins Zig 0.16.2 and retains
+the existing 1500-second test timeout; ordinary CI retains its existing pin.
+Dispatch with `provider=github` for an exact-head control and
+`provider=avrea` twice on the same commit. This named root gate does not
+replace the SDK, cross-platform, or provider-backed release gates.
