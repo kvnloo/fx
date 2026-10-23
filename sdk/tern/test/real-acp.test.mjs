@@ -106,7 +106,18 @@ test('REQUIRED real Zig fx ACP: Unicode HTTP boundary, owned-file allow/reject, 
   const saved = JSON.parse(await readFile(sessionPath, 'utf8'));
   assert.equal(saved.id, sessionId);
   assert.equal(saved.workspace_root, fixture.workspace);
-  assert.ok(saved.history_len > 0, 'The real process must save nonempty conversation history');
+  assert.equal(saved.schema_version, 4, 'Current session.json is metadata, not a legacy history snapshot');
+  const events = (await readFile(join(fixture.home, '.fx', 'sessions', sessionId, 'events.jsonl'), 'utf8'))
+    .trim().split('\n').map(line => JSON.parse(line));
+  assert.ok(events.length > 0, 'The real process must save conversation events');
+  for (const prompt of [fixture.prompts.unicode, fixture.prompts.allow, fixture.prompts.reject]) {
+    assert.equal(events.filter(frame => frame.event?.user?.text === prompt).length, 1,
+      'Each exact user prompt must persist once in the canonical conversation log');
+  }
+  for (const callId of [ALLOW_CALL_ID, REJECT_CALL_ID]) {
+    assert.equal(events.filter(frame => frame.event?.tool_call?.call_id === callId).length, 1);
+    assert.equal(events.filter(frame => frame.event?.tool_result?.call_id === callId).length, 1);
+  }
 
   const resumed = createClient();
   const replay = [];

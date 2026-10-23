@@ -154,7 +154,8 @@ test('the pinned SDK reconciles the exact focus target and dispatches native edi
 test('unsupported SDK negotiation falls back to plain input, while connect failures propagate', async () => {
   const input = new PassThrough(); input.isTTY = true;
   let printed = '';
-  const output = { isTTY: true, write(text) { printed += text; } };
+  const output = new PassThrough(); output.isTTY = true;
+  output.on('data', chunk => { printed += chunk; });
   const acp = new FakeAcp();
   const front = new FxTernFrontend({ acp, sdk: { connect: async () => null }, input, output });
   const running = front.run();
