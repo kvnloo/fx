@@ -34,6 +34,8 @@ The tests cover mock transport regressions and the real built FX subprocess. The
 
 The build receipt binds the binary SHA-256 to the checkout's Git head. Acceptance rejects a missing manifest, changed binary, or different source head. Source archives without `.git` must supply `FX_TERN_EXPECTED_HEAD` to both receipt generation and acceptance. Generate the receipt only after the corresponding build succeeds.
 
+The native Zig suite also executes the existing JS session-host fixture. Native fixture symbols use ordinary C linkage. WebAssembly builds retain the `fx` import module. A binding correction keeps that fixture executable without adding a native `libfx` dependency or replacing its assertions.
+
 For actual native Tern evidence, create an owned idle Tern shell on a private headless Sway display. Do not use an operator's existing window or default control socket. Then run:
 
 ```sh
