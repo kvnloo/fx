@@ -44,6 +44,10 @@ gh workflow run ci.yml --repo kvnloo/fx --ref "$FEATURE_BRANCH" \
 
 This mode runs only four independent certification phases: base/root, head/root, head/real-runtime, and head/WASM. Both source checkouts retain full Git metadata (`fetch-depth: 0`), so ignore-sensitive fixtures keep their repository context. Each phase uses Zig 0.16.0, a 6 GiB / 2 CPU systemd scope, a 1800-second remote deadline, and `-j1`. The paired native root flags are `-Dtarget=x86_64-linux -Dcpu=baseline -Doptimize=ReleaseSafe -j1`. Evidence artifacts retain source SHA, output, actual resource counters, and the runtime binary/receipt for native Tern proof. A failed base gate does not cancel the other phases and is not a waiver. Ordinary CI is unchanged unless this explicit mode is selected.
 
+For the separately authorized linkage comparison, add `-f tern_normalized_control=true`. This replaces only the base phase with `base-normalized-root`: it applies the native session-host linkage file from commit `12926a9f8fad012c8259c80b0473d82b6a27d115`, verifies that no other tracked file changed, and retains the exact patch/hash/provenance. It is a labelled modified-base control, never evidence that the untouched base passed.
+
+If the full head gate reports the host-disabled ACP regression, retain its failure and run an additional bounded ACP diagnostic. The diagnostic replays the recorded compiler/module graph with ACP-only selection, direct runner output, and error traces, recording elapsed time and whether the target test actually appeared. Its different diagnostic flags and result do not replace or waive the full exact-head gate.
+
 For actual native Tern evidence, create an owned idle Tern shell on an isolated Sway display and select a new session named `TRN1-FX-...`. Do not use an operator's existing window, session, or default control socket. Then run:
 
 ```sh

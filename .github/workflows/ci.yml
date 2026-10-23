@@ -11,6 +11,10 @@ on:
         description: Untouched merge-base commit for the paired Zig control
         type: string
         default: '6bdd49736abd4a85fb6dd60a824e4329784f34c0'
+      tern_normalized_control:
+        description: Replace the base gate with a separately labelled native-linkage-only control
+        type: boolean
+        default: false
   push:
     branches: [main]
   pull_request:
@@ -555,9 +559,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        gate: [base-root, head-root, head-runtime, head-wasm]
+        gate: ${{ fromJSON(inputs.tern_normalized_control && '["base-normalized-root","head-root","head-runtime","head-wasm"]' || '["base-root","head-root","head-runtime","head-wasm"]') }}
     env:
-      SOURCE_HEAD: ${{ matrix.gate == 'base-root' && inputs.tern_base_sha || github.sha }}
+      SOURCE_HEAD: ${{ startsWith(matrix.gate, 'base-') && inputs.tern_base_sha || github.sha }}
       CERTIFICATION_GATE: ${{ matrix.gate }}
     steps:
       - name: Check out the exact-head gate harness
