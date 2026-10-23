@@ -259,7 +259,16 @@ export class FxTernFrontend {
         }
       } finally { await this.terminal?.close(); }
     } finally {
-      try { await this.acp.close(); }
+      try {
+        const outcome = await this.acp.close();
+        this.outcome = outcome;
+        if (this.acp.failure) throw this.acp.failure;
+        if (outcome && (outcome.code !== 0 || outcome.signal !== null)) {
+          const error = new Error(`fx acp exited (${outcome.code ?? outcome.signal})${outcome.stderr ? ': ' + outcome.stderr : ''}`);
+          error.outcome = outcome;
+          throw error;
+        }
+      }
       finally {
         this.permissionQueue.length = 0;
         this.state.pendingPermission = null;

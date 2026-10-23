@@ -256,3 +256,41 @@ test('real SDK shutdown retires unsent frames without exceeding credits and rest
     assert.equal(acp.closed, true);
   } finally { await front.stop(); await running; }
 });
+
+for (const outcome of [
+  { code: 0, signal: null, stderr: '' },
+  { code: 17, signal: null, stderr: 'native failure' },
+  { code: null, signal: 'SIGTERM', stderr: '' },
+]) {
+  test(`run exposes actual FX shutdown outcome ${JSON.stringify(outcome)}`, async () => {
+    const sdk = fakeSdk();
+    const acp = new FakeAcp();
+    acp.close = async () => { acp.closed = true; return outcome; };
+    const front = new FxTernFrontend({ acp, sdk, input: { isTTY: true }, output: { isTTY: true, write() {} } });
+    const running = front.run();
+    const result = outcome.code === 0
+      ? running
+      : assert.rejects(running, error => error.outcome === outcome && /fx acp exited/.test(error.message));
+    await waitFor(() => front.surface);
+    await sdk.session.close();
+    await result;
+    assert.equal(front.outcome, outcome);
+    assert.equal(acp.closed, true);
+  });
+}
+
+test('run does not hide genuine transport failure during initiated shutdown', async () => {
+  const sdk = fakeSdk();
+  const acp = new FakeAcp();
+  const failure = new Error('broken stdin');
+  acp.close = async () => {
+    acp.failure = failure;
+    return { code: 0, signal: null, stderr: '' };
+  };
+  const front = new FxTernFrontend({ acp, sdk, input: { isTTY: true }, output: { isTTY: true, write() {} } });
+  const running = front.run();
+  const rejected = assert.rejects(running, error => error === failure);
+  await waitFor(() => front.surface);
+  await sdk.session.close();
+  await rejected;
+});

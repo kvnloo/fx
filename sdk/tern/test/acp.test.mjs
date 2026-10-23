@@ -49,7 +49,7 @@ test('ACP process exit rejects requests and does not leak permission state', asy
   await acp.close();
 });
 
-function memoryAcp(handle = () => {}) {
+function memoryAcp(handle = () => {}, { eof = true, terminate = true } = {}) {
   const child = new EventEmitter();
   Object.assign(child, { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), exitCode: null, signalCode: null });
   const sent = [];
@@ -62,12 +62,20 @@ function memoryAcp(handle = () => {}) {
     } else if (message.method === 'session/new') reply({ id: message.id, result: { sessionId: 'memory-session' } });
     else handle(message, reply);
   });
-  child.kill = signal => {
+  const signals = [];
+  const exit = (code, signal = null) => {
+    child.exitCode = code;
     child.signalCode = signal;
-    queueMicrotask(() => child.emit('exit', null, signal));
+    child.emit('exit', code, signal);
+    child.emit('close', code, signal);
+  };
+  child.stdin.on('finish', () => { if (eof && child.exitCode === null && child.signalCode === null) exit(0); });
+  child.kill = signal => {
+    signals.push(signal);
+    if (terminate || signal === 'SIGKILL') queueMicrotask(() => exit(null, signal));
     return true;
   };
-  return { acp: new FxAcp({ spawnProcess: () => child }), child, sent, reply };
+  return { acp: new FxAcp({ spawnProcess: () => child }), child, sent, reply, exit, signals };
 }
 
 test('initialization rejects incompatible ACP versions before creating a session', async () => {
@@ -131,7 +139,7 @@ test('close cancels every pending permission, rejects requests, and shares await
   assert.deepEqual(sent.find(message => message.id === 40).result, { outcome: { outcome: 'cancelled' } });
 });
 
-test('stdin failure settles requests and close still terminates the failed child', async () => {
+test('stdin failure settles requests and close still cleans the failed child', async () => {
   const { acp, child } = memoryAcp();
   await acp.start();
   const pending = acp.prompt('waiting');
@@ -140,6 +148,84 @@ test('stdin failure settles requests and close still terminates the failed child
   await rejection;
   assert.equal(acp.closed, true);
   await acp.close();
-  assert.equal(child.signalCode, 'SIGTERM');
+  assert.deepEqual(acp.outcome, { code: 0, signal: null, stderr: '' });
   assert.equal(acp.pending.size, 0);
+});
+
+test('clean EOF shutdown preserves the outcome without signals or runtime failures', async () => {
+  const { acp, signals } = memoryAcp();
+  const failures = [];
+  acp.on('failed', error => failures.push(error));
+  await acp.start();
+  const closing = acp.close();
+  assert.equal(acp.close(), closing);
+  assert.deepEqual(await closing, { code: 0, signal: null, stderr: '' });
+  assert.deepEqual(signals, []);
+  assert.deepEqual(failures, []);
+});
+
+test('nonzero EOF shutdown captures trailing stderr without spurious runtime failure', async () => {
+  const { acp, child, exit } = memoryAcp(() => {}, { eof: false });
+  const failures = [];
+  acp.on('failed', error => failures.push(error));
+  await acp.start();
+  child.stdin.on('finish', () => {
+    child.stderr.write('native shutdown failed');
+    exit(23);
+  });
+  assert.deepEqual(await acp.close(), { code: 23, signal: null, stderr: 'native shutdown failed' });
+  assert.deepEqual(failures, []);
+});
+
+test('shutdown waits for EOF deadline then escalates TERM to KILL only after its deadline', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { acp, signals } = memoryAcp(() => {}, { eof: false, terminate: false });
+  await acp.start();
+  const closing = acp.close();
+  assert.deepEqual(signals, []);
+  t.mock.timers.tick(999);
+  assert.deepEqual(signals, []);
+  t.mock.timers.tick(1);
+  assert.deepEqual(signals, ['SIGTERM']);
+  t.mock.timers.tick(999);
+  assert.deepEqual(signals, ['SIGTERM']);
+  t.mock.timers.tick(1);
+  assert.deepEqual(await closing, { code: null, signal: 'SIGKILL', stderr: '' });
+  assert.deepEqual(signals, ['SIGTERM', 'SIGKILL']);
+  assert.equal(acp.close(), closing);
+});
+
+test('exit before close retains the actual outcome and rejects requests once', async () => {
+  const { acp, child, exit, signals } = memoryAcp();
+  const failures = [];
+  acp.on('failed', error => failures.push(error));
+  await acp.start();
+  const rejected = assert.rejects(acp.prompt('waiting'), /fx acp exited \(7\)/);
+  child.stderr.write('fatal');
+  exit(7);
+  await rejected;
+  assert.deepEqual(await acp.close(), { code: 7, signal: null, stderr: 'fatal' });
+  assert.equal(failures.length, 1);
+  assert.deepEqual(signals, []);
+});
+
+test('process error rejects requests and automatically cleans the child', async () => {
+  const { acp, child } = memoryAcp();
+  await acp.start();
+  const rejected = assert.rejects(acp.prompt('waiting'), /spawn transport failed/);
+  child.emit('error', new Error('spawn transport failed'));
+  await rejected;
+  assert.deepEqual(await acp.close(), { code: 0, signal: null, stderr: '' });
+  assert.equal(acp.pending.size, 0);
+});
+
+test('EOF deadline permits SIGTERM fallback and preserves its actual signal', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { acp, signals } = memoryAcp(() => {}, { eof: false });
+  await acp.start();
+  const closing = acp.close();
+  t.mock.timers.tick(1000);
+  assert.deepEqual(await closing, { code: null, signal: 'SIGTERM', stderr: '' });
+  t.mock.timers.tick(1000);
+  assert.deepEqual(signals, ['SIGTERM']);
 });

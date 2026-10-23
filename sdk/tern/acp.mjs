@@ -5,15 +5,20 @@ import { EventEmitter } from 'node:events';
 const MAX_LINE = 2 * 1024 * 1024;
 const STARTUP_TIMEOUT = 30_000;
 const PROMPT_TIMEOUT = 15 * 60_000;
+const SHUTDOWN_TIMEOUT = 1000;
 
 export class FxAcp extends EventEmitter {
-  constructor({ binary = './zig-out/bin/fx', args = ['acp'], cwd = process.cwd(), env = process.env, spawnProcess = spawn } = {}) {
+  constructor({ binary = './zig-out/bin/fx', args = ['acp'], cwd = process.cwd(), env = process.env, spawnProcess = spawn, shutdownTimeout = SHUTDOWN_TIMEOUT } = {}) {
     super();
     this.binary = binary;
     this.args = args;
     this.cwd = cwd;
     this.env = env;
     this.spawnProcess = spawnProcess;
+    this.shutdownTimeout = shutdownTimeout;
+    this.outcome = null;
+    this.failure = null;
+    this.exited = null;
     this.nextId = 1;
     this.pending = new Map();
     this.permissions = new Map();
@@ -36,16 +41,27 @@ export class FxAcp extends EventEmitter {
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', chunk => { this.stderr = (this.stderr + chunk).slice(-4096); });
     child.on('error', err => this.#failed(err));
-    child.on('exit', (code, signal) => this.#failed(new Error(`fx acp exited (${code ?? signal})${this.stderr ? ': ' + this.stderr : ''}`)));
+    this.exited = new Promise(resolve => {
+      child.once('close', (code, signal) => {
+        this.outcome = { code, signal, stderr: this.stderr };
+        resolve(this.outcome);
+      });
+    });
+    child.on('exit', (code, signal) => {
+      if (!this.closed) this.#failed(new Error(`fx acp exited (${code ?? signal})${this.stderr ? ': ' + this.stderr : ''}`));
+    });
   }
 
   #failed(err) {
-    if (this.closed) return;
+    if (this.failure) return;
+    this.failure = err;
+    const expectedClose = this.closed;
     this.closed = true;
     for (const [, p] of this.pending) { clearTimeout(p.timer); p.reject(err); }
     this.pending.clear();
     this.permissions.clear();
-    this.emit('failed', err);
+    if (!expectedClose) this.emit('failed', err);
+    queueMicrotask(() => { void this.close(); });
   }
 
   #read(chunk) {
@@ -57,13 +73,13 @@ export class FxAcp extends EventEmitter {
       const line = this.buffer.slice(0, end).trim();
       this.buffer = this.buffer.slice(end + 1);
       if (!line) continue;
-      if (Buffer.byteLength(line) > MAX_LINE) { this.#failed(new Error('ACP message exceeds 2 MiB')); this.child?.kill(); return; }
+      if (Buffer.byteLength(line) > MAX_LINE) { this.#failed(new Error('ACP message exceeds 2 MiB')); return; }
       let message;
-      try { message = JSON.parse(line); } catch { this.#failed(new Error('Invalid ACP JSON')); this.child?.kill(); return; }
+      try { message = JSON.parse(line); } catch { this.#failed(new Error('Invalid ACP JSON')); return; }
       this.#dispatch(message);
       if (this.closed) return;
     }
-    if (Buffer.byteLength(this.buffer) > MAX_LINE) { this.#failed(new Error('ACP message exceeds 2 MiB')); this.child?.kill(); }
+    if (Buffer.byteLength(this.buffer) > MAX_LINE) this.#failed(new Error('ACP message exceeds 2 MiB'));
   }
 
   #dispatch(message) {
@@ -106,7 +122,8 @@ export class FxAcp extends EventEmitter {
     if (this.closed || !this.child?.stdin.writable) throw new Error('FX ACP is unavailable');
     const payload = JSON.stringify(message);
     if (Buffer.byteLength(payload) > MAX_LINE) throw new Error('ACP request exceeds 2 MiB');
-    this.child.stdin.write(payload + '\n');
+    try { this.child.stdin.write(payload + '\n'); }
+    catch (error) { this.#failed(error); throw error; }
   }
 
   request(method, params = {}, timeout = STARTUP_TIMEOUT) {
@@ -171,16 +188,20 @@ export class FxAcp extends EventEmitter {
       this.permissions.clear();
     }
     const child = this.child;
-    if (!child || child.exitCode !== null || child.signalCode != null) return;
-    await new Promise(resolve => {
-      const done = () => { clearTimeout(timer); child.off('exit', done); child.off('close', done); resolve(); };
-      const timer = setTimeout(() => {
-        if (child.exitCode === null && child.signalCode == null) child.kill('SIGKILL');
-      }, 1000);
-      child.once('exit', done);
-      child.once('close', done);
-      child.stdin.end();
-      child.kill('SIGTERM');
-    });
+    if (!child) return null;
+    if (this.outcome) return this.outcome;
+    // Wait for close, not exit: stderr may still have unread diagnostic bytes.
+    let timer;
+    const escalate = signal => {
+      if (child.exitCode === null && child.signalCode == null) child.kill(signal);
+      if (signal === 'SIGTERM') timer = setTimeout(() => escalate('SIGKILL'), this.shutdownTimeout);
+    };
+    timer = setTimeout(() => escalate('SIGTERM'), this.shutdownTimeout);
+    try {
+      try {
+        if (!child.stdin.destroyed && !child.stdin.writableEnded) child.stdin.end();
+      } catch (error) { this.#failed(error); }
+      return await this.exited;
+    } finally { clearTimeout(timer); }
   }
 }

@@ -26,24 +26,27 @@ Run builds and tests on your development build host. The real-runtime gates requ
 zig build -Doptimize=ReleaseSafe
 zig build test -Doptimize=ReleaseSafe
 npm ci --prefix sdk/tern --ignore-scripts
+node sdk/tern/build-receipt.mjs "$PWD/zig-out/bin/fx"
 FX_TERN_REAL_BINARY="$PWD/zig-out/bin/fx" npm test --prefix sdk/tern
 ```
 
 The tests cover mock transport regressions and the real built FX subprocess. The real gate uses an isolated profile and a synthetic loopback provider. It checks multiline Unicode at the HTTP boundary, real file writes behind allow/reject decisions, persistence, and new-process resume. Missing `FX_TERN_REAL_BINARY` fails the gate. The ordinary-terminal CLI gate uses a Python OS PTY and supported single-line Unicode input. Synthetic replies do not constitute live-provider evidence.
 
+The build receipt binds the binary SHA-256 to the checkout's Git head. Acceptance rejects a missing manifest, changed binary, or different source head. Source archives without `.git` must supply `FX_TERN_EXPECTED_HEAD` to both receipt generation and acceptance. Generate the receipt only after the corresponding build succeeds.
+
 For actual native Tern evidence, create an owned idle Tern shell on a private headless Sway display. Do not use an operator's existing window or default control socket. Then run:
 
 ```sh
 TERN_NATIVE_CONTROL=/absolute/owned/control.sock \
-TERN_NATIVE_RECEIPT=/absolute/owned/evidence \
+TERN_NATIVE_RECEIPT=/absolute/owned/new-evidence-directory \
 TERN_NATIVE_OWNED_SWAY=1 \
 FX_TERN_REAL_BINARY="$PWD/zig-out/bin/fx" \
 node sdk/tern/native-smoke.mjs
 ```
 
-The Linux driver requires util-linux `script` for its PTY output relay. It uses the real CLI/FX subprocess and synthetic provider. It records native edit/send, approval buttons and file effects, resize, cancellation, following-shell execution, and cooked TTY state. Screenshots go to the Tern window's configured output directory. Inspect them and the retained JSON before acceptance. `wire.jsonl` contains SDK traffic. `pty-output.log` also captures the directly encoded close packet. `app-exit.json` checks the actual Node app's raw-mode state before the relay restores its parent TTY.
+The Linux driver requires util-linux `script` for its PTY output relay. It refuses an existing evidence directory. It uses the real CLI/FX subprocess and synthetic provider. It checks exact rendered and atomic Unicode values, approval buttons and file effects, resize, cancellation, following-shell execution, and cooked TTY state. Screenshots use Tern's output directory unless `TERN_NATIVE_DISPLAY_WRAPPER` names an approved absolute helper accepting `screenshot PATH`. Inspect screenshots and retained JSON before acceptance. `wire.jsonl` contains SDK traffic. `pty-output.log` captures the directly encoded close packet. `app-exit.json` checks Node raw mode before relay restoration. `app-fx-exit.json` must show a normal FX exit and clean stderr.
 
-For a daemon-backed detach/reattach check, additionally set `TERN_NATIVE_REATTACH=1`. At `NATIVE_REATTACH_READY`, detach only the owned window, then attach it to the same owned daemon/session and control endpoint. Write `owned-window-reattached` to the receipt directory's `reattached` file. The driver checks editor recovery before exit. Without this option, its result explicitly records that detach/reattach was not exercised.
+For a daemon-backed detach/reattach check, additionally set `TERN_NATIVE_REATTACH=1`. At `NATIVE_REATTACH_READY`, detach only the owned window. Wait for `detached.json`, which records the driver's observed control disconnect. Reattach the same owned session at the same control endpoint. Never stop a shared daemon or select another user's session. Write a JSON object containing the exact `runId` from `reattach-ready.json` to the new `reattached` file. The driver checks the fresh acknowledgement, unsent draft, and unchanged provider request count. Without this option, the result explicitly records that detach/reattach was not exercised.
 
 The RFC and Draft PR distinguish automated tests, actual Tern evidence, and repository promotion gates. Do not commit credentials or private transcripts. Native receipt files contain only owned fixture data.
 
