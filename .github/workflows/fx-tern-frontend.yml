@@ -1,0 +1,23 @@
+name: FX Tern frontend
+on:
+  pull_request:
+    paths:
+      - 'sdk/tern/**'
+      - '.github/workflows/fx-tern-frontend.yml'
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Node unit and ACP integration tests
+        run: node --test sdk/tern/test/*.test.mjs
+      - name: Verify official SDK package installation
+        run: npm install --ignore-scripts --no-audit --no-fund
+        working-directory: sdk/tern
+      - name: Verify SDK exports
+        run: node --input-type=module -e "import('@stencil-hq/tern').then(x => { if (!x.connect || !x.ui || !x.html) process.exit(1) })"
+        working-directory: sdk/tern
