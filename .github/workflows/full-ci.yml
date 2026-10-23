@@ -5,6 +5,8 @@ on:
   push:
     branches-ignore:
       - main
+      # This branch runs bounded, full named suites through avrea-factory.yml.
+      - ci/avrea-factory-20261023
 
 concurrency:
   group: full-ci-${{ github.ref }}
