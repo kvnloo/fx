@@ -39,3 +39,15 @@ test('stream updates preserve message identity and remove unsafe control bytes',
   model.finishPrompt();
   assert.equal(model.busy, false);
 });
+
+test('native caret offsets cannot split a surrogate pair and malformed sends are rejected', () => {
+  const draft = new Draft();
+  assert.equal(draft.edit({ from: 0, to: 0, text: '🙂', cursor: 1, len: 0 }), false);
+  assert.equal(draft.text, '');
+  assert.equal(draft.edit({ from: 0, to: 0, text: '🙂', cursor: 2, len: 0 }), true);
+  assert.equal(draft.cursor, 2);
+  assert.equal(draft.edit({ from: 2, to: 2, text: '', cursor: 1, len: 2 }), false);
+  assert.equal(draft.send(undefined), null);
+  assert.equal(draft.send({ text: '🙂' }), null);
+  assert.equal(draft.text, '🙂');
+});

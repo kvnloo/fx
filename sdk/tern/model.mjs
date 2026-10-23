@@ -21,10 +21,10 @@ export class Draft {
   edit({ from, to, text, cursor, len }) {
     if (!Number.isSafeInteger(len) || len !== this.text.length || !Number.isSafeInteger(from) || !Number.isSafeInteger(to)
       || from < 0 || to < from || to > len || typeof text !== 'string' || !Number.isSafeInteger(cursor)) return false;
-    const atBoundary = pos => !(pos > 0 && pos < this.text.length && /[\uD800-\uDBFF]/.test(this.text[pos - 1]) && /[\uDC00-\uDFFF]/.test(this.text[pos]));
-    if (!atBoundary(from) || !atBoundary(to)) return false;
+    const atBoundary = (value, pos) => !(pos > 0 && pos < value.length && /[\uD800-\uDBFF]/.test(value[pos - 1]) && /[\uDC00-\uDFFF]/.test(value[pos]));
+    if (!atBoundary(this.text, from) || !atBoundary(this.text, to)) return false;
     const next = this.text.slice(0, from) + text + this.text.slice(to);
-    if (Buffer.byteLength(next) > MAX_DRAFT || cursor < 0 || cursor > next.length) return false;
+    if (Buffer.byteLength(next) > MAX_DRAFT || cursor < 0 || cursor > next.length || !atBoundary(next, cursor)) return false;
     this.#save();
     this.text = next;
     this.cursor = cursor;
@@ -40,7 +40,7 @@ export class Draft {
   }
   send(text) {
     // An atomic send must match the authoritative draft, not a stale UI event.
-    if (text !== this.text || !text.trim() || Buffer.byteLength(text) > MAX_DRAFT) return null;
+    if (typeof text !== 'string' || text !== this.text || !text.trim() || Buffer.byteLength(text) > MAX_DRAFT) return null;
     const value = this.text;
     this.history.length = 0;
     this.text = '';
