@@ -1,7 +1,10 @@
 const std = @import("std");
 const session_codec = @import("session_codec.zig");
+const host_target = @import("../hosts/target.zig");
 
 const Allocator = std.mem.Allocator;
+// WASM imports name the JS module; native host fixtures export ordinary C symbols.
+const host_library: ?[]const u8 = if (host_target.is_wasm) "fx" else null;
 
 pub const max_session_bytes: usize = 16 * 1024 * 1024;
 pub const max_revision_bytes: usize = 1024;
@@ -31,7 +34,7 @@ pub const Metadata = struct {
     }
 };
 
-extern "fx" fn fx_session_load(
+const fx_session_load = @extern(*const fn (
     id_ptr: [*]const u8,
     id_len: usize,
     bytes_ptr: [*]u8,
@@ -39,9 +42,9 @@ extern "fx" fn fx_session_load(
     revision_ptr: [*]u8,
     revision_cap: usize,
     revision_len_out: *usize,
-) i32;
+) callconv(.c) i32, .{ .name = "fx_session_load", .library_name = host_library });
 
-extern "fx" fn fx_session_commit(
+const fx_session_commit = @extern(*const fn (
     id_ptr: [*]const u8,
     id_len: usize,
     bytes_ptr: [*]const u8,
@@ -51,17 +54,17 @@ extern "fx" fn fx_session_commit(
     revision_ptr: [*]u8,
     revision_cap: usize,
     revision_len_out: *usize,
-) i32;
+) callconv(.c) i32, .{ .name = "fx_session_commit", .library_name = host_library });
 
-extern "fx" fn fx_session_list(
+const fx_session_list = @extern(*const fn (
     response_ptr: [*]u8,
     response_cap: usize,
-) i32;
+) callconv(.c) i32, .{ .name = "fx_session_list", .library_name = host_library });
 
-extern "fx" fn fx_session_remove(
+const fx_session_remove = @extern(*const fn (
     id_ptr: [*]const u8,
     id_len: usize,
-) i32;
+) callconv(.c) i32, .{ .name = "fx_session_remove", .library_name = host_library });
 
 pub fn load(alloc: Allocator, id: []const u8) !?Loaded {
     var encoded_capacity = initial_session_bytes;

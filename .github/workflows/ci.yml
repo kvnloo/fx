@@ -2,16 +2,30 @@ name: CI
 
 on:
   workflow_dispatch:
+    inputs:
+      tern_certify:
+        description: Run only the exact-source Tern certification gates
+        type: boolean
+        default: false
+      tern_base_sha:
+        description: Untouched merge-base commit for the paired Zig control
+        type: string
+        default: '6bdd49736abd4a85fb6dd60a824e4329784f34c0'
+      tern_normalized_control:
+        description: Replace the base gate with a separately labelled native-linkage-only control
+        type: boolean
+        default: false
   push:
     branches: [main]
   pull_request:
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.ref }}${{ inputs.tern_certify && '-tern-certification' || '' }}
   cancel-in-progress: true
 
 jobs:
   zig_mode:
+    if: ${{ !inputs.tern_certify }}
     name: Build & Test (${{ matrix.optimize }})
     runs-on: ubuntu-latest
     strategy:
@@ -54,7 +68,7 @@ jobs:
 
   zig:
     name: Build & Test
-    if: ${{ always() }}
+    if: ${{ always() && !inputs.tern_certify }}
     needs: zig_mode
     runs-on: ubuntu-latest
     steps:
@@ -64,6 +78,7 @@ jobs:
         run: test "$MATRIX_RESULT" = success
 
   sdk-node-wasm:
+    if: ${{ !inputs.tern_certify }}
     name: SDK (Node + WASM)
     runs-on: ubuntu-latest
     steps:
@@ -98,6 +113,7 @@ jobs:
           node --experimental-wasm-jspi sdk/tests/test-skills-adapter.mjs host wasm
 
   sdk-node-napi:
+    if: ${{ !inputs.tern_certify }}
     name: SDK (Node + N-API)
     runs-on: ubuntu-latest
     steps:
@@ -128,6 +144,7 @@ jobs:
           node sdk/tests/test-skills-adapter.mjs disk native
 
   sdk-bun:
+    if: ${{ !inputs.tern_certify }}
     name: SDK (Bun + N-API/WASM)
     runs-on: ubuntu-latest
     steps:
@@ -252,6 +269,7 @@ jobs:
           if-no-files-found: ignore
 
   sdk-browser-wasm:
+    if: ${{ !inputs.tern_certify }}
     name: SDK (Browser + WASM)
     runs-on: ubuntu-latest
     steps:
@@ -282,6 +300,7 @@ jobs:
         run: npm run --prefix sdk test:browser-wasm
 
   e2e_mode:
+    if: ${{ !inputs.tern_certify }}
     name: E2E (deterministic, ${{ matrix.optimize }})
     runs-on: ubuntu-latest
     strategy:
@@ -423,7 +442,7 @@ jobs:
 
   e2e:
     name: E2E (deterministic)
-    if: ${{ always() }}
+    if: ${{ always() && !inputs.tern_certify }}
     needs: e2e_mode
     runs-on: ubuntu-latest
     steps:
@@ -433,6 +452,7 @@ jobs:
         run: test "$MATRIX_RESULT" = success
 
   cross-target:
+    if: ${{ !inputs.tern_certify }}
     name: Cross-target Compile (${{ matrix.name }})
     runs-on: ubuntu-latest
     strategy:
@@ -467,6 +487,7 @@ jobs:
           echo "${{ matrix.name }}: $bytes bytes ($mib MiB)" >> "$GITHUB_STEP_SUMMARY"
 
   lint-scripts:
+    if: ${{ !inputs.tern_certify }}
     name: Shellcheck
     runs-on: ubuntu-latest
     steps:
@@ -527,3 +548,66 @@ jobs:
         env:
           MATRIX_RESULT: ${{ needs.e2e_acp_full_mode.result }}
         run: test "$MATRIX_RESULT" = success
+
+  tern-certification:
+    name: Tern certification (${{ matrix.gate }})
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.tern_certify }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        gate: ${{ fromJSON(inputs.tern_normalized_control && '["base-normalized-root","head-root","head-runtime","head-wasm"]' || '["base-root","head-root","head-runtime","head-wasm"]') }}
+    env:
+      SOURCE_HEAD: ${{ startsWith(matrix.gate, 'base-') && inputs.tern_base_sha || github.sha }}
+      CERTIFICATION_GATE: ${{ matrix.gate }}
+    steps:
+      - name: Check out the exact-head gate harness
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: harness
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check out the selected source with real Git metadata
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_HEAD }}
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: '0.16.0'
+          cache-key: tern-certification-${{ matrix.gate }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Run the bounded 6 GiB / 2 CPU gate
+        shell: bash
+        run: |
+          evidence="$RUNNER_TEMP/tern-certification"
+          mkdir -p "$evidence"
+          unit="tern-cert-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${CERTIFICATION_GATE}"
+          set +e
+          sudo systemd-run --wait --pipe --unit="$unit" \
+            --uid="$(id -u)" --working-directory="$GITHUB_WORKSPACE/source" \
+            --property=MemoryMax=6G --property=CPUQuota=200% \
+            --property=RuntimeMaxSec=1800 \
+            --setenv="HOME=$HOME" --setenv="PATH=$PATH" --setenv="LANG=C.UTF-8" \
+            bash "$GITHUB_WORKSPACE/harness/sdk/tern/ci-gate.sh" \
+            "$CERTIFICATION_GATE" "$SOURCE_HEAD" "$evidence" 2>&1 | tee "$evidence/gate.log"
+          status=${PIPESTATUS[0]}
+          set -e
+          sudo systemctl show "$unit" -p Result -p MemoryMax -p MemoryPeak \
+            -p CPUQuotaPerSecUSec -p CPUUsageNSec > "$evidence/limits.txt" || true
+          exit "$status"
+      - name: Retain exact-source evidence and native artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tern-certification-${{ matrix.gate }}-${{ github.sha }}
+          path: ${{ runner.temp }}/tern-certification
+          if-no-files-found: warn

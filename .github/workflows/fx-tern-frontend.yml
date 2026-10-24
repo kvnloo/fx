@@ -1,0 +1,28 @@
+name: FX Tern frontend
+on:
+  pull_request:
+    paths:
+      - 'sdk/tern/**'
+      - '.github/workflows/fx-tern-frontend.yml'
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: '0.16.0'
+      - name: Verify official SDK package installation
+        run: npm ci --ignore-scripts --no-audit --no-fund
+        working-directory: sdk/tern
+      - name: Build and bind real FX runtime to exact source
+        run: node sdk/tern/build-receipt.mjs --build -- -Doptimize=ReleaseSafe
+      - name: Node unit and real ACP integration tests
+        run: FX_TERN_REAL_BINARY="$PWD/zig-out/bin/fx" node --test sdk/tern/test/*.test.mjs
+      - name: Verify SDK exports
+        run: node --input-type=module -e "import('@stencil-hq/tern').then(x => { if (!x.connect || !x.ui || !x.html) process.exit(1) })"
+        working-directory: sdk/tern
