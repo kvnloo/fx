@@ -3192,6 +3192,16 @@ test "ACP host-disabled new load and resume skip project MCP effects" {
         try std.testing.expect(state.active_session.?.mcp == null);
     }
 
+    // Successful session responses include the model registry. Capture only the
+    // rejected requests below so this assertion is independent of registry size.
+    var rejected_capture = try tmp.dir.createFile(
+        io_mod.getIo(),
+        "acp-host-disabled-rejected.jsonl",
+        .{ .read = true },
+    );
+    defer rejected_capture.close(io_mod.getIo());
+    state.writer.stdout = rejected_capture;
+
     const local_request = try std.fmt.allocPrint(
         arena,
         "{{\"name\":\"request-local\",\"command\":\"/bin/sh\",\"args\":[\"-c\",\"printf launched > {s}\"],\"env\":[]}}",
@@ -3233,10 +3243,10 @@ test "ACP host-disabled new load and resume skip project MCP effects" {
         error.FileNotFound,
         tmp.dir.openFile(io_mod.getIo(), "workspace/project-mcp-launched", .{}),
     );
-    try capture.sync(io_mod.getIo());
+    try rejected_capture.sync(io_mod.getIo());
     var captured_file = try tmp.dir.openFile(
         io_mod.getIo(),
-        "acp-host-disabled.jsonl",
+        "acp-host-disabled-rejected.jsonl",
         .{},
     );
     defer captured_file.close(io_mod.getIo());
