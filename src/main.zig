@@ -107,6 +107,7 @@ const mcp_access_policy = @import("core/mcp/access_policy.zig");
 const app_mcp_runtime = @import("core/app/app_mcp_runtime.zig");
 const skill_commands = @import("core/skills/skill_commands.zig");
 const skill_runtime = @import("core/skills/skill_runtime.zig");
+const plugin_manifest = @import("core/plugins/plugin_manifest.zig");
 const cli_surface = @import("core/cli/cli_surface.zig");
 const hooks = @import("core/hooks/hooks.zig");
 const github_publish = @import("core/github/github_publish.zig");
@@ -10701,4 +10702,8 @@ test "wait card: the screen's own model choice still writes the user settings" {
     defer if (settings) |text| alloc.free(text);
     const text = settings orelse return error.UserSettingsMissing;
     try std.testing.expect(std.mem.find(u8, text, "openai/gpt-5-mini") != null);
+}
+
+test "Agent Plugins manifest inspector participates in core tests" {
+    _ = plugin_manifest;
 }
